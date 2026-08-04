@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extrator PDF Jurídico → Markdown</title>
+<style>
+  :root {
+    --bg: #0b1120; --bg-2: #111827;
+    --surface: #1a2234; --surface-2: #212b40;
+    --border: #2d3a54; --border-soft: #243049;
+    --text: #e8edf7; --muted: #93a0bc;
+    --accent: #4f8cff; --accent-2: #6ea6ff;
+    --ok: #2ecc71; --warn: #f5a524; --err: #ef4444;
+    --shadow: 0 4px 20px rgba(0,0,0,.25);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 60px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(ellipse 80% 40% at 50% 0%, #1a2550 0%, transparent 60%),
+      linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+    background-attachment: fixed;
+    color: var(--text); min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 1040px; margin: 0 auto; }
+  h1 {
+    margin: 0 0 6px; font-size: 26px; font-weight: 700; letter-spacing: -.02em;
+    background: linear-gradient(135deg, #e8edf7 0%, #93a0bc 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .sub { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 28px; }
+
+  .drop {
+    display: block; position: relative;
+    border: 2px dashed var(--border); border-radius: 16px;
+    padding: 56px 24px; text-align: center; cursor: pointer;
+    background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+    transition: border-color .2s, transform .15s;
+  }
+  .drop:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .drop.dragover { border-color: var(--accent); border-style: solid;
+    background: linear-gradient(180deg, #1c2a4f 0%, #1a2242 100%); }
+  .drop input { display: none; }
+  .drop .icon { font-size: 44px; margin-bottom: 10px; display: inline-block;
+    filter: drop-shadow(0 2px 8px rgba(79,140,255,.3)); }
+  .drop .label { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .drop .hint { color: var(--muted); font-size: 13px; }
+
+  .opts {
+    display: flex; gap: 12px; margin-top: 16px; padding: 14px 18px;
+    background: var(--surface); border: 1px solid var(--border-soft);
+    border-radius: 10px; font-size: 13px; flex-wrap: wrap; align-items: center;
+  }
+  .opts label { color: var(--muted); }
+  .opts select {
+    background: var(--bg-2); color: var(--text);
+    border: 1px solid var(--border); padding: 7px 10px; border-radius: 7px;
+    font-size: 13px; min-width: 220px; max-width: 340px; cursor: pointer;
+  }
+  .opts select:disabled { opacity: .45; cursor: not-allowed; }
+  .badge-prompt {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 10px; padding: 5px 10px; border-radius: 6px;
+    background: rgba(79,140,255,.12); border: 1px solid rgba(79,140,255,.35);
+    color: var(--accent-2); font-size: 12px; font-weight: 500;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  }
+  .opts select:focus { outline: none; border-color: var(--accent); }
+  .opts .nota { color: var(--muted); font-size: 12px; margin-left: auto;
+    display: flex; align-items: center; gap: 6px; }
+  .opts .escudo { color: var(--ok); }
+
+  .global-actions { display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap;
+    align-items: center; min-height: 36px; }
+  .global-actions .info { color: var(--muted); font-size: 13px; margin-left: auto; }
+  button {
+    background: var(--accent); color: #fff; border: none;
+    padding: 9px 16px; border-radius: 8px; cursor: pointer;
+    font-size: 13px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: filter .15s, transform .1s;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button.ghost:hover:not(:disabled) { background: var(--surface); border-color: var(--accent); }
+
+  .job {
+    background: var(--surface); border: 1px solid var(--border-soft);
+    border-radius: 10px; padding: 16px; margin-bottom: 12px;
+    box-shadow: var(--shadow); animation: slideIn .3s;
+  }
+  .job.ok  { border-left: 3px solid var(--ok); }
+  .job.err { border-left: 3px solid var(--err); }
+  .job.run { border-left: 3px solid var(--accent); }
+  .job-head { display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 10px; gap: 12px; }
+  .job-head .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1; font-weight: 600; font-size: 14px; }
+  .job-meta { color: var(--muted); font-size: 12px; flex-shrink: 0;
+    background: var(--bg-2); padding: 3px 8px; border-radius: 4px; }
+  .bar { height: 6px; background: var(--bg-2); border-radius: 4px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width .4s; box-shadow: 0 0 12px rgba(79,140,255,.4); }
+  .bar > div.indet { width: 40% !important; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+  .status { font-size: 13px; margin-top: 8px; color: var(--muted); }
+  .status.ok { color: var(--ok); font-weight: 500; }
+  .status.err { color: var(--err); font-weight: 500; }
+  .avisos { margin-top: 8px; font-size: 12px; color: var(--warn); }
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;
+    margin-top: 12px; font-size: 12px; }
+  .stat { background: var(--bg-2); padding: 8px 6px; border-radius: 6px; text-align: center; }
+  .stat b { display: block; font-size: 16px; color: var(--text); font-weight: 700; }
+  .stat span { color: var(--muted); font-size: 11px; }
+  .actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .actions button { padding: 6px 12px; font-size: 12px; }
+
+  #preview-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.85);
+    backdrop-filter: blur(4px); display: none;
+    align-items: center; justify-content: center; z-index: 100; padding: 24px;
+  }
+  #preview-modal.open { display: flex; animation: fadeIn .2s; }
+  #preview-modal .body {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px;
+    max-width: 900px; width: 100%; max-height: 85vh; overflow: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; white-space: pre-wrap; line-height: 1.5;
+    box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  #preview-modal .close { position: absolute; top: 24px; right: 24px; background: var(--err); }
+
+  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+  @keyframes slideIn { from { opacity: 0; transform: translateY(-6px) }
+                       to { opacity: 1; transform: translateY(0) } }
+  @media (max-width: 680px) {
+    body { padding: 20px 14px 40px; }
+    .stats { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Extrator PDF Jurídico → Markdown</h1>
+  <div class="sub">
+    PJe/TJBA · processamento 100% local · segmentação por Id da capa ·
+    limpeza de boilerplate · fidelidade integral das peças
+  </div>
+
+  <label class="drop" id="drop">
+    <input type="file" id="file" accept="application/pdf" multiple>
+    <div class="icon">⚖️</div>
+    <div class="label">Clique ou arraste PDFs de processos aqui</div>
+    <div class="hint">Múltiplos arquivos são processados em fila</div>
+  </label>
+
+  <div class="opts">
+    <label for="area">Análise:</label>
+    <select id="area">
+      <option value="">Nenhuma — apenas proteção contra injection</option>
+    </select>
+    <select id="promptSel" disabled>
+      <option value="">Escolha a área primeiro</option>
+    </select>
+    <span class="nota"><span class="escudo">🛡</span>
+      proteção contra prompt injection sempre incluída</span>
+  </div>
+
+  <div class="global-actions">
+    <button id="btnTodos" disabled>⬇ Baixar todos (.md)</button>
+    <button id="btnLimpar" class="ghost">🗑 Limpar lista</button>
+    <span class="info" id="info"></span>
+  </div>
+
+  <div id="jobs"></div>
+</div>
+
+<div id="preview-modal">
+  <div class="body" id="preview-body"></div>
+  <button class="close" onclick="document.getElementById('preview-modal').classList.remove('open')">Fechar</button>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const jobs = [];          // { file, el, resultado, perfil }
+let processando = false;
+
+// ---------- catálogo de prompts (área -> categoria -> prompt) ----------
+let CATALOGO = [];
+(async () => {
+  try {
+    const r = await fetch("/api/perfis");
+    CATALOGO = await r.json();
+    for (const area of CATALOGO) {
+      const opt = document.createElement("option");
+      opt.value = area.chave;
+      opt.textContent = area.nome;
+      $("area").appendChild(opt);
+    }
+  } catch { /* seletores ficam só com a opção padrão */ }
+})();
+
+$("area").addEventListener("change", () => {
+  const sel = $("promptSel");
+  sel.innerHTML = "";
+  const area = CATALOGO.find(a => a.chave === $("area").value);
+  if (!area) {
+    sel.disabled = true;
+    sel.innerHTML = '<option value="">Escolha a área primeiro</option>';
+    return;
+  }
+  sel.disabled = false;
+  const padrao = document.createElement("option");
+  padrao.value = "";
+  padrao.textContent = "Selecione o prompt…";
+  sel.appendChild(padrao);
+  for (const cat of area.categorias) {
+    const grupo = document.createElement("optgroup");
+    grupo.label = cat.nome;
+    for (const p of cat.prompts) {
+      const opt = document.createElement("option");
+      opt.value = `${area.chave}.${cat.chave}.${p.chave}`;
+      opt.textContent = p.nome;
+      grupo.appendChild(opt);
+    }
+    sel.appendChild(grupo);
+  }
+});
+
+// ---------- dropzone ----------
+const drop = $("drop"), inputFile = $("file");
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("dragover"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault(); drop.classList.remove("dragover");
+  adicionar([...e.dataTransfer.files]);
+});
+inputFile.addEventListener("change", () => { adicionar([...inputFile.files]); inputFile.value = ""; });
+
+function adicionar(files) {
+  for (const f of files) {
+    if (!f.name.toLowerCase().endsWith(".pdf")) continue;
+    const el = criarCard(f.name, f.size);
+    $("jobs").prepend(el.card);
+    jobs.push({ file: f, el, resultado: null, estado: "fila",
+                perfil: $("promptSel").disabled ? "" : $("promptSel").value });
+  }
+  processarFila();
+}
+
+// ---------- card ----------
+function criarCard(nome, bytes) {
+  const card = document.createElement("div");
+  card.className = "job run";
+  card.innerHTML = `
+    <div class="job-head">
+      <div class="name"></div>
+      <div class="job-meta">${(bytes / 1048576).toFixed(1)} MB</div>
+    </div>
+    <div class="bar"><div></div></div>
+    <div class="status">Na fila…</div>
+    <div class="badge-prompt" hidden></div>
+    <div class="avisos" hidden></div>
+    <div class="stats" hidden></div>
+    <div class="actions" hidden>
+      <button data-acao="baixar">⬇ Baixar .md</button>
+      <button data-acao="copiar" class="ghost">Copiar</button>
+      <button data-acao="ver" class="ghost">Pré-visualizar</button>
+    </div>`;
+  card.querySelector(".name").textContent = nome;   // textContent: sem injeção de HTML
+  return {
+    card,
+    barra: card.querySelector(".bar > div"),
+    status: card.querySelector(".status"),
+    badge: card.querySelector(".badge-prompt"),
+    avisos: card.querySelector(".avisos"),
+    stats: card.querySelector(".stats"),
+    actions: card.querySelector(".actions"),
+  };
+}
+
+// ---------- fila (um por vez: o gargalo é CPU do servidor local) ----------
+async function processarFila() {
+  if (processando) return;
+  processando = true;
+  let job;
+  while ((job = jobs.find(j => j.estado === "fila"))) {
+    job.estado = "processando";
+    await processarJob(job);
+  }
+  processando = false;
+  atualizarGlobais();
+}
+
+async function processarJob(job) {
+  const { el } = job;
+  el.status.textContent = "Extraindo e estruturando…";
+  el.barra.classList.add("indet");
+  try {
+    const fd = new FormData();
+    fd.append("arquivo", job.file);
+    fd.append("perfil", job.perfil || "");
+    const resp = await fetch("/api/converter", { method: "POST", body: fd });
+    if (!resp.ok) {
+      const erro = await resp.json().catch(() => ({}));
+      throw new Error(erro.detail || `HTTP ${resp.status}`);
+    }
+    const r = await resp.json();
+    job.resultado = r;
+    job.estado = "ok";
+    el.barra.classList.remove("indet");
+    el.barra.style.width = "100%";
+    el.card.className = "job ok";
+    el.status.className = "status ok";
+    el.status.textContent = `✓ Concluído — ${r.numero || r.nome}`;
+
+    if (r.perfil) {
+      el.badge.hidden = false;
+      el.badge.textContent =
+        `🧠 ${r.perfil.area} › ${r.perfil.categoria} › ${r.perfil.prompt}`;
+      el.badge.title = "Prompt especializado embutido no arquivo .md";
+    }
+
+    el.stats.hidden = false;
+    const s = r.stats;
+    el.stats.innerHTML = `
+      <div class="stat"><b>${s.paginas}</b><span>páginas</span></div>
+      <div class="stat"><b>${s.pecas_principais}</b><span>peças principais</span></div>
+      <div class="stat"><b>${s.pecas_expediente}</b><span>expediente</span></div>
+      <div class="stat"><b>${(s.chars_bruto / 1000).toFixed(0)}k→${(s.chars_limpo / 1000).toFixed(0)}k</b><span>caracteres</span></div>
+      <div class="stat"><b>${Math.round((1 - s.chars_limpo / Math.max(1, s.chars_bruto)) * 100)}%</b><span>ruído removido</span></div>`;
+
+    if (r.avisos && r.avisos.length) {
+      el.avisos.hidden = false;
+      el.avisos.textContent = "⚠ " + r.avisos.join(" · ");
+    }
+
+    el.actions.hidden = false;
+    el.actions.querySelector('[data-acao="baixar"]').onclick = () => baixar(job);
+    el.actions.querySelector('[data-acao="copiar"]').onclick = async (e) => {
+      await navigator.clipboard.writeText(r.markdown);
+      e.target.textContent = "Copiado ✓";
+      setTimeout(() => (e.target.textContent = "Copiar"), 1500);
+    };
+    el.actions.querySelector('[data-acao="ver"]').onclick = () => {
+      $("preview-body").textContent = r.markdown;  // textContent: preview seguro
+      $("preview-modal").classList.add("open");
+    };
+  } catch (err) {
+    job.estado = "erro";
+    el.barra.classList.remove("indet");
+    el.card.className = "job err";
+    el.status.className = "status err";
+    el.status.textContent = "✗ " + (err.message || "Falha no processamento");
+  }
+}
+
+// ---------- ações ----------
+function nomeSaida(job) {
+  return (job.resultado.numero || job.resultado.nome.replace(/\.pdf$/i, "")) + ".md";
+}
+function baixar(job) {
+  const blob = new Blob([job.resultado.markdown], { type: "text/markdown;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = nomeSaida(job);
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+$("btnTodos").onclick = () => {
+  jobs.filter(j => j.estado === "ok").forEach((j, i) => setTimeout(() => baixar(j), i * 300));
+};
+$("btnLimpar").onclick = () => {
+  jobs.length = 0;
+  $("jobs").innerHTML = "";
+  atualizarGlobais();
+};
+function atualizarGlobais() {
+  const ok = jobs.filter(j => j.estado === "ok").length;
+  $("btnTodos").disabled = ok === 0;
+  $("info").textContent = jobs.length
+    ? `${ok}/${jobs.length} concluído(s)` : "";
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") $("preview-modal").classList.remove("open");
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.claude/
+*.md
+!README.md
+.git/
+.gitignore
+teste-*.md
