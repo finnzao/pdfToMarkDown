@@ -1,0 +1,37 @@
+EXTRATOR PDF JURIDICO - COMO INSTALAR
+======================================
+
+INSTALACAO (feita uma unica vez)
+---------------------------------
+1. Copie o arquivo .zip do programa para o seu computador
+   (por exemplo, para Documentos ou para a Area de Trabalho).
+
+2. Clique com o botao direito no arquivo .zip e escolha
+   "Extrair Tudo...". Na janela que abrir, clique em "Extrair".
+
+   IMPORTANTE: nao pule este passo. O programa nao funciona
+   se for aberto de dentro do .zip sem extrair.
+
+3. Abra a pasta que foi criada e de dois cliques no arquivo:
+   instalar.bat
+
+4. Vai abrir uma janela preta. Aguarde ate aparecer a mensagem
+   "Instalacao concluida!" (pode levar alguns minutos).
+
+5. Pressione qualquer tecla para fechar a janela.
+
+USO NO DIA A DIA
+----------------
+1. De dois cliques no arquivo:  iniciar.bat
+
+2. O navegador abre sozinho com o programa pronto para usar.
+
+3. Quando terminar, feche a janela preta para encerrar o programa.
+
+PROBLEMAS?
+----------
+- Se o navegador abrir com erro de "pagina nao encontrada",
+  aguarde alguns segundos e aperte F5 (atualizar).
+
+- Se a instalacao falhar, verifique se o computador esta
+  conectado a internet e rode o instalar.bat novamente.
