@@ -38,6 +38,7 @@ class Resultado:
     chars_limpo: int
     avisos: list[str]
     perfil: dict | None = None  # prompt especializado aplicado (ou None)
+    autos: str = ""  # markdown sem envelope/prompts (para montar lotes)
 
 
 def extrair_paginas(doc: fitz.Document) -> list[str]:
@@ -178,6 +179,7 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
     )
     # Envelopa com o bloco de proteção contra prompt injection (sempre)
     # e o prompt especializado do catálogo (quando escolhido).
+    autos = markdown
     markdown, info_perfil = montar_documento(markdown, perfil)
 
     n_desc = sum(
@@ -195,4 +197,5 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
         chars_limpo=len(markdown),
         avisos=avisos,
         perfil=info_perfil,
+        autos=autos,
     )

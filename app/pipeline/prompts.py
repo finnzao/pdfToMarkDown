@@ -470,3 +470,55 @@ def montar_documento(markdown_autos: str, prompt_id: str | None) -> tuple[str, d
     partes.append("")
     partes.append(fim)
     return "\n".join(partes), info
+
+
+_NOTA_LOTE = """\
+7. **Lote**: este arquivo reúne {n} processo(s) distintos, cada um em seu
+   próprio envelope `{ini}` … `{fim}`. Analise cada processo
+   separadamente, identifique-o pelo número e nunca misture fatos, partes
+   ou provas de um processo com os de outro.
+"""
+
+
+def _montar_lote(prompt_id: str | None, autos: list[str]) -> str:
+    token = gerar_token()
+    ini, fim = envelope(token)
+    info = resolver(prompt_id)
+    partes = [bloco_protecao(token)
+              + _NOTA_LOTE.format(n=len(autos), ini=ini, fim=fim)]
+    if info:
+        partes += [bloco_especializado(info), ""]
+    for i, a in enumerate(autos, 1):
+        partes += [f"<!-- PROCESSO {i} de {len(autos)} -->", ini, "", a, "",
+                   fim, ""]
+    return "\n".join(partes)
+
+
+def montar_lotes(itens: list[tuple[str, str | None]],
+                 limite_bytes: int) -> list[str]:
+    """Agrupa processos [(autos, prompt_id)] em arquivos de lote de até
+    `limite_bytes`, com proteção e prompt uma única vez por arquivo.
+    Um processo nunca é cortado: se sozinho excede o limite, vira um lote
+    próprio. Troca de prompt também abre novo lote."""
+    # ponytail: o cabeçalho (~3 KB) não entra na conta do limite
+    grupos: list[list] = []  # [prompt_id, [autos], bytes]
+    for autos, pid in itens:
+        tam = len(autos.encode("utf-8"))
+        g = grupos[-1] if grupos else None
+        if g and g[0] == pid and g[2] + tam <= limite_bytes:
+            g[1].append(autos)
+            g[2] += tam
+        else:
+            grupos.append([pid, [autos], tam])
+    return [_montar_lote(pid, autos) for pid, autos, _ in grupos]
+
+
+if __name__ == "__main__":
+    _l = montar_lotes([("a" * 60, None), ("b" * 60, None), ("c" * 500, None),
+                       ("d" * 10, None), ("e" * 10, "inexistente")], 100)
+    # [a] [b] [c grande, sozinho] [d] [e: outro prompt]
+    assert len(_l) == 5, len(_l)
+    assert "c" * 500 in _l[2] and "PROCESSO 1 de 1" in _l[2]
+    _l = montar_lotes([("a" * 40, None), ("b" * 40, None)], 100)
+    assert len(_l) == 1 and "PROCESSO 2 de 2" in _l[0]
+    print("ok")

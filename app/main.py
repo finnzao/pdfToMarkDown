@@ -12,22 +12,27 @@ Endpoints:
     GET  /               interface web
     GET  /api/perfis     catálogo de prompts especializados
     POST /api/converter  multipart com um PDF; retorna JSON com o Markdown
+    POST /api/zip        lista [{nome, markdown}]; retorna um .zip
+    POST /api/lotes      {limite_kb, processos}; .zip com MDemloteN.md
 """
 from __future__ import annotations
 
 import base64
+import io
 import os
 import secrets
 import traceback
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from .pipeline import processar
-from .pipeline.prompts import catalogo_api, resolver
+from .pipeline.prompts import catalogo_api, montar_lotes, resolver
 
 MAX_BYTES = 200 * 1024 * 1024  # 200 MB por arquivo
 
@@ -97,6 +102,7 @@ async def converter(arquivo: UploadFile = File(...),
         "nome": r.nome,
         "numero": r.numero,
         "markdown": r.markdown,
+        "autos": r.autos,
         "stats": {
             "paginas": r.total_paginas,
             "pecas_principais": r.pecas_principais,
@@ -110,9 +116,52 @@ async def converter(arquivo: UploadFile = File(...),
     })
 
 
+class _Arquivo(BaseModel):
+    nome: str
+    markdown: str
+
+
+@app.post("/api/zip")
+async def zipar(arquivos: list[_Arquivo]) -> Response:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for a in arquivos:
+            z.writestr(Path(a.nome).name, a.markdown)
+    return Response(
+        buf.getvalue(), media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="extrator.zip"'},
+    )
+
+
+class _Processo(BaseModel):
+    autos: str
+    perfil: str = ""
+
+
+class _PedidoLotes(BaseModel):
+    limite_kb: int = Field(2048, ge=100, le=10240)
+    processos: list[_Processo]
+
+
+@app.post("/api/lotes")
+async def lotes(pedido: _PedidoLotes) -> Response:
+    """Junta os processos em MDemlote1.md, MDemlote2.md… de até limite_kb."""
+    docs = montar_lotes([(p.autos, p.perfil or None) for p in pedido.processos],
+                        pedido.limite_kb * 1024)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for i, doc in enumerate(docs, 1):
+            z.writestr(f"MDemlote{i}.md", doc)
+    return Response(
+        buf.getvalue(), media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="lotes.zip"'},
+    )
+
+
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(_STATIC / "index.html")
+    return FileResponse(_STATIC / "index.html",
+                        headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")

@@ -61,6 +61,8 @@
     border: 1px solid var(--border); padding: 7px 10px; border-radius: 7px;
     font-size: 13px; min-width: 220px; max-width: 340px; cursor: pointer;
   }
+  .opts #limiteLote { max-width: 100%; }
+  .opts label:has(#lote) { color: var(--text); cursor: pointer; }
   .opts select:disabled { opacity: .45; cursor: not-allowed; }
   .badge-prompt {
     display: inline-flex; align-items: center; gap: 6px;
@@ -174,8 +176,17 @@
       proteção contra prompt injection sempre incluída</span>
   </div>
 
+  <div class="opts">
+    <label><input type="checkbox" id="lote"> Juntar processos em lote (para análise por IA)</label>
+    <select id="limiteLote" disabled>
+      <option value="400">400 KB · ~100 mil tokens · qualquer IA atual</option>
+      <option value="2048" selected>2 MB · ~500 mil tokens · modelos com janela de 1 milhão</option>
+      <option value="8192">8 MB · ~2 milhões de tokens · só ferramentas que indexam (NotebookLM)</option>
+    </select>
+  </div>
+
   <div class="global-actions">
-    <button id="btnTodos" disabled>⬇ Baixar todos (.md)</button>
+    <button id="btnTodos" disabled>⬇ Baixar todos (.zip)</button>
     <button id="btnLimpar" class="ghost">🗑 Limpar lista</button>
     <span class="info" id="info"></span>
   </div>
@@ -368,16 +379,44 @@ async function processarJob(job) {
 function nomeSaida(job) {
   return (job.resultado.numero || job.resultado.nome.replace(/\.pdf$/i, "")) + ".md";
 }
-function baixar(job) {
-  const blob = new Blob([job.resultado.markdown], { type: "text/markdown;charset=utf-8" });
+function salvar(blob, nome) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = nomeSaida(job);
+  a.download = nome;
   a.click();
   URL.revokeObjectURL(a.href);
 }
-$("btnTodos").onclick = () => {
-  jobs.filter(j => j.estado === "ok").forEach((j, i) => setTimeout(() => baixar(j), i * 300));
+function baixar(job) {
+  salvar(new Blob([job.resultado.markdown], { type: "text/markdown;charset=utf-8" }), nomeSaida(job));
+}
+$("lote").onchange = () => { $("limiteLote").disabled = !$("lote").checked; };
+async function baixarLotes() {
+  const limite_kb = +$("limiteLote").value;
+  const ok = jobs.filter(j => j.estado === "ok");
+  const r = await fetch("/api/lotes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      limite_kb,
+      processos: ok.map(j => ({ autos: j.resultado.autos, perfil: j.perfil || "" })),
+    }),
+  });
+  if (!r.ok) return alert("Falha ao gerar os lotes");
+  salvar(await r.blob(), "lotes.zip");
+  const grandes = ok.filter(j => new Blob([j.resultado.autos]).size > limite_kb * 1024).length;
+  if (grandes) alert(`${grandes} processo(s) excedem o limite sozinhos e ficaram em lote próprio.`);
+}
+$("btnTodos").onclick = async () => {
+  if ($("lote").checked) return baixarLotes();
+  const arquivos = jobs.filter(j => j.estado === "ok")
+    .map(j => ({ nome: nomeSaida(j), markdown: j.resultado.markdown }));
+  const r = await fetch("/api/zip", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(arquivos),
+  });
+  if (!r.ok) return alert("Falha ao gerar o .zip");
+  salvar(await r.blob(), "extrator.zip");
 };
 $("btnLimpar").onclick = () => {
   jobs.length = 0;
