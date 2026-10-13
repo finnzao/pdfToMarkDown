@@ -1,3 +1,16 @@
+---
+title: Extrator PDF Jurídico
+emoji: ⚖️
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+sdk_version: 5.49.1
+python_version: '3.12'
+app_file: space.py
+pinned: false
+short_description: 'Extrator PDF Jurídico → Markdown (OCR local, PJe)'
+---
+
 # Extrator PDF Jurídico → Markdown
 
 Aplicação web local que converte PDFs de processos judiciais (PJe/TJBA e
