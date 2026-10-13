@@ -16,9 +16,19 @@ uvicorn app.main:app --port 8077
 
 Abra <http://localhost:8077>, arraste os PDFs e baixe os `.md`.
 
+Para usuários sem Python: `instalar.bat` + `iniciar.bat` (ver
+`COMO-INSTALAR.txt`), ou gere um executável único com `build.bat`
+(`dist\Extrator.exe`, nada a instalar).
+
 ## O que a aplicação faz
 
-1. **Extração de texto** com PyMuPDF, em ordem de leitura (`sort=True`);
+1. **Extração de texto** com PyMuPDF, em ordem de leitura (`sort=True`).
+   Páginas escaneadas (camada de texto ínfima + imagem grande, o caso dos
+   processos antigos) passam por **OCR local** — Tesseract embutido no
+   PyMuPDF, idioma `por`, 300 dpi, deskew automático até ±6°, uma
+   página por núcleo da CPU em paralelo. Páginas nativas não pagam nada.
+   Peças OCRizadas levam a nota `[peça reconhecida por OCR]` no `.md`;
+   páginas com OCR de qualidade baixa geram aviso no card;
 2. **Parse da capa do PJe** — metadados (número CNJ, classe, órgão,
    partes...) e a tabela "Documentos", com reconstituição dos Ids
    quebrados em duas linhas pela extração;
@@ -64,6 +74,8 @@ app/
   main.py                 # API FastAPI
   pipeline/
     processador.py        # orquestrador PDF -> Markdown
+    ocr.py                # OCR local de páginas escaneadas (+ deskew)
+    tessdata/             # idioma português do Tesseract (por.traineddata)
     capa.py               # parse da capa do PJe (fonte de verdade)
     segmentacao.py        # segmentação por Id de rodapé
     limpeza.py            # remoção de boilerplate
@@ -74,7 +86,10 @@ static/index.html         # interface web
 
 ## Limitações atuais
 
-- PDFs 100% escaneados (sem camada de texto) ainda não passam por OCR —
-  próxima evolução planejada (Tesseract nativo);
+- A "qualidade" do OCR é uma heurística (proporção de tokens com cara de
+  palavra), não a confiança real do Tesseract — serve para apontar páginas
+  a conferir, não para medir precisão;
+- Manuscritos e carimbos sobrepostos ao texto não são lidos com
+  confiabilidade por OCR clássico;
 - Padrões de limpeza calibrados para PJe/TJBA e Sinesp/PPe; outros
   tribunais podem exigir novos padrões em `limpeza.py`.

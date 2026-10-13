@@ -116,7 +116,7 @@
   .status.ok { color: var(--ok); font-weight: 500; }
   .status.err { color: var(--err); font-weight: 500; }
   .avisos { margin-top: 8px; font-size: 12px; color: var(--warn); }
-  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;
+  .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;
     margin-top: 12px; font-size: 12px; }
   .stat { background: var(--bg-2); padding: 8px 6px; border-radius: 6px; text-align: center; }
   .stat b { display: block; font-size: 16px; color: var(--text); font-weight: 700; }
@@ -154,7 +154,7 @@
   <h1>Extrator PDF Jurídico → Markdown</h1>
   <div class="sub">
     PJe/TJBA · processamento 100% local · segmentação por Id da capa ·
-    limpeza de boilerplate · fidelidade integral das peças
+    limpeza de boilerplate · OCR local em páginas escaneadas · fidelidade integral das peças
   </div>
 
   <label class="drop" id="drop">
@@ -325,7 +325,21 @@ async function processarJob(job) {
       const erro = await resp.json().catch(() => ({}));
       throw new Error(erro.detail || `HTTP ${resp.status}`);
     }
-    const r = await resp.json();
+    // NDJSON: linhas de progresso do OCR e, por último, resultado ou erro
+    let r = null;
+    for await (const msg of lerNdjson(resp.body)) {
+      if (msg.progresso) {
+        const { feitas, total } = msg.progresso;
+        el.barra.classList.remove("indet");
+        el.barra.style.width = `${Math.round(100 * feitas / total)}%`;
+        el.status.textContent = `OCR em páginas escaneadas — ${feitas}/${total}`;
+      } else if (msg.erro) {
+        throw new Error(msg.erro);
+      } else if (msg.resultado) {
+        r = msg.resultado;
+      }
+    }
+    if (!r) throw new Error("Conexão interrompida");
     job.resultado = r;
     job.estado = "ok";
     el.barra.classList.remove("indet");
@@ -345,10 +359,11 @@ async function processarJob(job) {
     const s = r.stats;
     el.stats.innerHTML = `
       <div class="stat"><b>${s.paginas}</b><span>páginas</span></div>
+      <div class="stat"><b>${s.paginas_ocr}</b><span>págs. via OCR</span></div>
       <div class="stat"><b>${s.pecas_principais}</b><span>peças principais</span></div>
       <div class="stat"><b>${s.pecas_expediente}</b><span>expediente</span></div>
       <div class="stat"><b>${(s.chars_bruto / 1000).toFixed(0)}k→${(s.chars_limpo / 1000).toFixed(0)}k</b><span>caracteres</span></div>
-      <div class="stat"><b>${Math.round((1 - s.chars_limpo / Math.max(1, s.chars_bruto)) * 100)}%</b><span>ruído removido</span></div>`;
+      <div class="stat"><b>${Math.max(0, Math.round((1 - s.chars_limpo / Math.max(1, s.chars_bruto)) * 100))}%</b><span>ruído removido</span></div>`;
 
     if (r.avisos && r.avisos.length) {
       el.avisos.hidden = false;
@@ -372,6 +387,19 @@ async function processarJob(job) {
     el.card.className = "job err";
     el.status.className = "status err";
     el.status.textContent = "✗ " + (err.message || "Falha no processamento");
+  }
+}
+
+async function* lerNdjson(body) {
+  const reader = body.getReader(), dec = new TextDecoder();
+  let resto = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    resto += dec.decode(value || new Uint8Array(), { stream: !done });
+    const linhas = resto.split("\n");
+    resto = linhas.pop();
+    for (const l of linhas) if (l.trim()) yield JSON.parse(l);
+    if (done) return;
   }
 }
 

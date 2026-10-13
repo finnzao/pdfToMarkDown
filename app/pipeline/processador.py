@@ -8,19 +8,22 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from . import limpeza
 from .capa import (MetaProcesso, casar_indice_com_rodapes, eh_capa,
                    eh_continuacao_capa, parsear_capa)
 from .classificacao import (categoria_do_tipo_pje, classificar_conteudo, grupo)
 from .markdown_gen import gerar_markdown
+from .ocr import Progresso, ocr_paginas, precisa_ocr
 from .prompts import montar_documento
 from .segmentacao import segmentar
 
 # Menos que isso de conteúdo substantivo após a limpeza = página/peça de
 # puro boilerplate (rodapés de assinatura, folhas Sinesp).
 _MIN_CHARS_SUBSTANTIVOS = 30
+# Abaixo disso, o OCR provavelmente leu lixo (ver ocr.qualidade)
+_MIN_QUALIDADE_OCR = 0.7
 
 _RE_NUMERO_CNJ = re.compile(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}")
 
@@ -39,12 +42,32 @@ class Resultado:
     avisos: list[str]
     perfil: dict | None = None  # prompt especializado aplicado (ou None)
     autos: str = ""  # markdown sem envelope/prompts (para montar lotes)
+    paginas_ocr: int = 0
 
 
 def extrair_paginas(doc: fitz.Document) -> list[str]:
     """Texto de todas as páginas, em ordem de leitura (sort=True ordena
     blocos por posição — essencial em layouts de duas colunas do PJe)."""
     return [page.get_text("text", sort=True) for page in doc]
+
+
+def extrair_com_ocr(pdf_bytes: bytes, progresso: Progresso | None = None
+                    ) -> tuple[list[str], dict[int, tuple[str, float, float]]]:
+    """Camada de texto de todas as páginas; as escaneadas (sem camada de
+    texto, imagem grande) passam pelo OCR. Retorna (textos, info_ocr) com
+    info_ocr = {índice: (texto, ângulo, qualidade)}."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        paginas = extrair_paginas(doc)
+        indices = [i for i, t in enumerate(paginas) if precisa_ocr(doc[i], t)]
+    finally:
+        doc.close()
+    if indices and progresso:
+        progresso(0, len(indices))
+    info = ocr_paginas(pdf_bytes, indices, progresso)
+    for i, (texto, _, _) in info.items():
+        paginas[i] = texto
+    return paginas, info
 
 
 def _detectar_capa(paginas: list[str]) -> int:
@@ -64,16 +87,25 @@ def _detectar_capa(paginas: list[str]) -> int:
 
 
 def processar(pdf_bytes: bytes, nome_arquivo: str,
-              perfil: str | None = None) -> Resultado:
+              perfil: str | None = None,
+              progresso: Progresso | None = None) -> Resultado:
+    """`progresso(feitas, total)` é chamado durante o OCR (única etapa
+    lenta) para a interface mostrar o andamento."""
     avisos: list[str] = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        paginas = extrair_paginas(doc)
-    finally:
-        doc.close()
+    paginas, info_ocr = extrair_com_ocr(pdf_bytes, progresso)
 
     total = len(paginas)
     chars_bruto = sum(len(p) for p in paginas)
+
+    if info_ocr:
+        ruins = sorted(i + 1 for i, (_, _, q) in info_ocr.items()
+                       if q < _MIN_QUALIDADE_OCR)
+        if ruins:
+            avisos.append(
+                f"OCR com qualidade baixa nas págs. "
+                f"{', '.join(map(str, ruins))} — o texto pode conter erros "
+                f"de leitura; confira no PDF original."
+            )
 
     # --- capa ---------------------------------------------------------------
     primeira_corpo = _detectar_capa(paginas)
@@ -114,12 +146,21 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
         texto = "\n\n".join(t for t in paginas_limpas if t).strip()
         pags = (f"Pág. {peca.pag_ini}" if peca.pag_ini == peca.pag_fim
                 else f"Págs. {peca.pag_ini}–{peca.pag_fim}")
+        ocr = any(i in info_ocr
+                  for i in range(peca.pag_ini - 1, peca.pag_fim))
 
         if len(limpeza.texto_substantivo(texto)) < _MIN_CHARS_SUBSTANTIVOS:
             rotulo = f" (Id {peca.id_pje})" if peca.id_pje else ""
-            descartes.append(
-                f"{pags}: apenas rodapés de assinatura/boilerplate{rotulo}."
-            )
+            if ocr:
+                # Nunca rotular imagem como boilerplate: o OCR rodou e não
+                # achou texto — pode ser foto, planta, página ilegível.
+                motivo = "imagem sem texto legível (OCR não reconheceu texto)"
+                avisos.append(f"{pags}: {motivo} — conferir no PDF.")
+            elif not any(limpeza.texto_substantivo(t) for t in peca.paginas):
+                motivo = "página sem texto nem imagem (em branco)"
+            else:
+                motivo = "apenas rodapés de assinatura/boilerplate"
+            descartes.append(f"{pags}: {motivo}{rotulo}.")
             continue
 
         entrada = indice_por_id.get(peca.id_pje)
@@ -150,6 +191,7 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
             "pag_ini": peca.pag_ini,
             "pag_fim": peca.pag_fim,
             "texto": texto,
+            "ocr": ocr,
         }
         (pecas_a if g == "A" else pecas_b).append(item)
 
@@ -175,7 +217,8 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
             )
 
     markdown = gerar_markdown(
-        meta, nome_arquivo, total, pecas_a, pecas_b, descartes
+        meta, nome_arquivo, total, pecas_a, pecas_b, descartes,
+        paginas_ocr=len(info_ocr),
     )
     # Envelopa com o bloco de proteção contra prompt injection (sempre)
     # e o prompt especializado do catálogo (quando escolhido).
@@ -198,4 +241,5 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
         avisos=avisos,
         perfil=info_perfil,
         autos=autos,
+        paginas_ocr=len(info_ocr),
     )

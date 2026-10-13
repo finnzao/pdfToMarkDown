@@ -11,14 +11,17 @@ aplicação na web — os documentos processados são sigilosos).
 Endpoints:
     GET  /               interface web
     GET  /api/perfis     catálogo de prompts especializados
-    POST /api/converter  multipart com um PDF; retorna JSON com o Markdown
+    POST /api/converter  multipart com um PDF; NDJSON: progresso do OCR
+                         linha a linha e, por fim, o resultado com o Markdown
     POST /api/zip        lista [{nome, markdown}]; retorna um .zip
     POST /api/lotes      {limite_kb, processos}; .zip com MDemloteN.md
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
+import json
 import os
 import secrets
 import traceback
@@ -27,7 +30,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -76,7 +80,7 @@ async def perfis() -> JSONResponse:
 
 @app.post("/api/converter")
 async def converter(arquivo: UploadFile = File(...),
-                    perfil: str = Form("")) -> JSONResponse:
+                    perfil: str = Form("")) -> StreamingResponse:
     if not (arquivo.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "Envie um arquivo .pdf")
     if perfil and resolver(perfil) is None:
@@ -87,24 +91,50 @@ async def converter(arquivo: UploadFile = File(...),
     if not dados.startswith(b"%PDF"):
         raise HTTPException(400, "Conteúdo não é um PDF válido")
 
-    try:
-        # processamento é CPU-bound: roda no threadpool para não bloquear
-        # o event loop enquanto outros usuários usam a aplicação
-        r = await run_in_threadpool(
-            processar, dados, arquivo.filename, perfil or None
-        )
-    except Exception:
-        traceback.print_exc()
-        raise HTTPException(422, "Falha ao processar o PDF — arquivo "
-                                 "corrompido ou protegido?")
+    # Resposta em NDJSON: linhas {"progresso": {feitas, total}} durante o
+    # OCR e, por último, {"resultado": {...}} ou {"erro": "..."}.
+    loop = asyncio.get_running_loop()
+    fila: asyncio.Queue = asyncio.Queue()
 
-    return JSONResponse({
+    def progresso(feitas: int, total: int) -> None:  # chamado da thread
+        loop.call_soon_threadsafe(
+            fila.put_nowait, {"progresso": {"feitas": feitas, "total": total}}
+        )
+
+    async def rodar() -> None:
+        try:
+            # processamento é CPU-bound: roda no threadpool para não
+            # bloquear o event loop enquanto outros usuários usam a aplicação
+            r = await run_in_threadpool(
+                processar, dados, arquivo.filename, perfil or None, progresso
+            )
+            fila.put_nowait({"resultado": _json_resultado(r)})
+        except Exception:
+            traceback.print_exc()
+            fila.put_nowait({"erro": "Falha ao processar o PDF — arquivo "
+                                     "corrompido ou protegido?"})
+
+    async def gerar():
+        tarefa = asyncio.create_task(rodar())
+        while True:
+            msg = await fila.get()
+            yield json.dumps(msg, ensure_ascii=False) + "\n"
+            if "resultado" in msg or "erro" in msg:
+                break
+        await tarefa
+
+    return StreamingResponse(gerar(), media_type="application/x-ndjson")
+
+
+def _json_resultado(r) -> dict:
+    return {
         "nome": r.nome,
         "numero": r.numero,
         "markdown": r.markdown,
         "autos": r.autos,
         "stats": {
             "paginas": r.total_paginas,
+            "paginas_ocr": r.paginas_ocr,
             "pecas_principais": r.pecas_principais,
             "pecas_expediente": r.pecas_expediente,
             "paginas_descartadas": r.paginas_descartadas,
@@ -113,7 +143,7 @@ async def converter(arquivo: UploadFile = File(...),
         },
         "avisos": r.avisos,
         "perfil": r.perfil,  # {area, categoria, prompt, ...} ou null
-    })
+    }
 
 
 class _Arquivo(BaseModel):

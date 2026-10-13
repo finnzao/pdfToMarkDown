@@ -12,6 +12,10 @@ import datetime as _dt
 from .capa import MetaProcesso
 
 
+_NOTA_OCR = ("> ⚠ **[peça reconhecida por OCR]** — páginas escaneadas; o texto "
+             "pode conter erros de leitura. Em caso de dúvida, confira no PDF.")
+
+
 def _yaml_escape(v: str) -> str:
     return '"' + v.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
@@ -23,8 +27,10 @@ def gerar_markdown(
     pecas_a: list[dict],
     pecas_b: list[dict],
     descartes: list[str],
+    paginas_ocr: int = 0,
 ) -> str:
-    """Cada peça (dict): categoria, titulo, data, id_pje, pag_ini, pag_fim, texto."""
+    """Cada peça (dict): categoria, titulo, data, id_pje, pag_ini, pag_fim,
+    texto, ocr (bool: alguma página veio de OCR)."""
     md: list[str] = []
 
     # --- frontmatter --------------------------------------------------------
@@ -53,6 +59,7 @@ def gerar_markdown(
         md.append(f"valor_causa: {_yaml_escape(meta.valor_causa)}")
     md.append(f"total_paginas_pdf: {total_paginas}")
     md.append(f"pecas_transcritas: {len(pecas_a)}")
+    md.append(f"paginas_ocr: {paginas_ocr}")
     md.append(f"gerado_em: \"{_dt.date.today().isoformat()}\"")
     md.append(f"fonte: {_yaml_escape(nome_arquivo)}")
     md.append("---")
@@ -83,6 +90,9 @@ def gerar_markdown(
     for n, p in enumerate((x for x in todas if x["grupo"] == "A"), start=1):
         md.append(_cabecalho_peca(n, p))
         md.append("")
+        if p.get("ocr"):
+            md.append(_NOTA_OCR)
+            md.append("")
         md.append(p["texto"])
         md.append("")
         md.append("---")
@@ -101,6 +111,9 @@ def gerar_markdown(
             data = f" — {p['data']}" if p["data"] else ""
             md.append(f"### {titulo}{data} `[{ident}]`")
             md.append("")
+            if p.get("ocr"):
+                md.append(_NOTA_OCR)
+                md.append("")
             md.append(p["texto"])
             md.append("")
         md.append("---")

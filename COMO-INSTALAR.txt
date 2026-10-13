@@ -1,6 +1,15 @@
 EXTRATOR PDF JURIDICO - COMO INSTALAR
 ======================================
 
+RECEBEU O ARQUIVO Extrator.exe?
+-------------------------------
+Nao precisa instalar nada: de dois cliques no Extrator.exe. Vai abrir
+uma janela preta e, em seguida, o navegador com o programa. Para
+encerrar, feche a janela preta. (Na primeira vez o Windows pode
+perguntar se confia no programa: clique em "Mais informacoes" e depois
+em "Executar assim mesmo".) O restante deste arquivo e para quem
+recebeu a pasta com os arquivos .bat.
+
 INSTALACAO (feita uma unica vez)
 ---------------------------------
 1. Copie o arquivo .zip do programa para o seu computador
