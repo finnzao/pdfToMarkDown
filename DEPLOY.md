@@ -91,8 +91,15 @@ se tornar o Space público (aí são a única barreira contra uso por
 terceiros da sua cota de CPU; documentos não ficam armazenados em
 nenhum caso).
 
-Hiberna após 48 h sem uso (demora ~1 min para acordar). Space existente:
-<https://huggingface.co/spaces/Comarca/extrator-pdf-juridico>.
+Hiberna após 48 h sem uso (demora ~1 min para acordar). Space existente
+(público): <https://huggingface.co/spaces/Comarca/extrator-pdf-juridico>;
+aplicação direta em <https://comarca-extrator-pdf-juridico.hf.space/>.
+
+Detalhes do ZeroGPU que o `space.py` contorna: o container é encerrado se
+nenhuma função `@spaces.GPU` for registrada, e esse registro só é enviado
+dentro de `Blocks.launch()` — por isso um Gradio vazio é lançado numa
+porta lateral; e `PORT` vale 7861 (uso interno), a porta exposta é a de
+`GRADIO_SERVER_PORT` (7860).
 
 ## Opção 3 — Rede interna (tribunal/escritório)
 
