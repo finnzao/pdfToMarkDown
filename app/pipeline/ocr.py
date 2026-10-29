@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import pymupdf as fitz
 import numpy as np
@@ -71,11 +74,15 @@ def ocr_pagina(page: fitz.Page) -> tuple[str, float]:
     m = fitz.Matrix(DPI / 72, DPI / 72).prerotate(ang)
     pix = page.get_pixmap(matrix=m, colorspace=fitz.csGRAY)
     tmp = fitz.open()
-    p = tmp.new_page(width=pix.w * 72 / DPI, height=pix.h * 72 / DPI)
-    p.insert_image(p.rect, pixmap=pix)
-    tp = p.get_textpage_ocr(language=IDIOMA, dpi=DPI, full=True,
-                            tessdata=TESSDATA)
-    texto = p.get_text("text", textpage=tp, sort=True)
+    try:
+        p = tmp.new_page(width=pix.w * 72 / DPI, height=pix.h * 72 / DPI)
+        p.insert_image(p.rect, pixmap=pix)
+        del pix  # ~8,7 MB a 300 dpi; o documento temporário já tem a cópia
+        tp = p.get_textpage_ocr(language=IDIOMA, dpi=DPI, full=True,
+                                tessdata=TESSDATA)
+        texto = p.get_text("text", textpage=tp, sort=True)
+    finally:
+        tmp.close()
     # rodapé original por último: `id_da_pagina` usa a última ocorrência
     return texto + "\n" + page.get_text("text"), ang
 
@@ -101,48 +108,163 @@ def qualidade(texto: str) -> float:
 
 
 # --- paralelismo por página -------------------------------------------------
+# Cada worker carrega MuPDF + Tesseract e renderiza a 300 dpi: o pico de RSS
+# por worker (medido) fica em ~300 MB com o store do MuPDF esvaziado a cada
+# página e chegava a 520 MB sem isso. O número de workers é limitado pela
+# memória disponível, não só pela CPU: 7 workers num PDF de 1 MB já somavam
+# 1,9 GB.
+_MB_POR_WORKER = 600  # folga sobre o pico medido
+_MB_RESERVA = 512     # processo principal: bytes do PDF, textos, servidor
 _doc: fitz.Document | None = None
 
 
-def _iniciar(pdf_bytes: bytes) -> None:
+@dataclass
+class Telemetria:
+    """Recursos usados numa conversão. Vai em `stats.recursos` da API para
+    calibrar MAX_BYTES e o nº de workers no hardware real."""
+    workers: int = 0
+    cpu_count: int = 0
+    memoria_disponivel_mb: int | None = None
+    pico_pai_mb: int = 0            # pico de RSS do processo principal
+    pico_worker_mb: int = 0         # maior pico entre os workers
+    soma_picos_workers_mb: int = 0  # soma dos picos: teto do consumo total
+
+    def como_dict(self) -> dict:
+        return asdict(self)
+
+
+def memoria_disponivel_mb() -> int | None:
+    """Memória utilizável em MB: limite do cgroup (contêiner) quando há um,
+    senão RAM livre do sistema. None quando não dá para saber."""
+    for p in ("/sys/fs/cgroup/memory.max",
+              "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = Path(p).read_text().strip()
+        except OSError:
+            continue
+        if v.isdigit() and int(v) < 1 << 50:  # "max" / 2^63 = sem limite
+            return int(v) >> 20
+    try:
+        return (os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) >> 20
+    except (AttributeError, ValueError, OSError):
+        pass
+    try:
+        import psutil  # opcional (Windows/desktop)
+        return psutil.virtual_memory().available >> 20
+    except ImportError:
+        return None
+
+
+def pico_rss_mb() -> int:
+    """Pico de memória residente deste processo (MB); 0 se não mensurável."""
+    try:
+        for linha in Path("/proc/self/status").read_text().splitlines():
+            if linha.startswith("VmHWM:"):
+                return int(linha.split()[1]) >> 10
+    except OSError:
+        pass
+    try:
+        import psutil
+        m = psutil.Process().memory_info()
+        return getattr(m, "peak_wset", m.rss) >> 20
+    except ImportError:
+        return 0
+
+
+def n_workers(n_paginas: int) -> int:
+    """min(páginas, CPUs-1, memória/600 MB, 8); OCR_WORKERS força um valor."""
+    forcado = os.environ.get("OCR_WORKERS", "")
+    if forcado.isdigit():
+        return max(1, min(n_paginas, int(forcado)))
+    por_cpu = max(1, (os.cpu_count() or 2) - 1)
+    mem = memoria_disponivel_mb()
+    por_mem = (mem - _MB_RESERVA) // _MB_POR_WORKER if mem else por_cpu
+    return max(1, min(n_paginas, por_cpu, por_mem, 8))
+
+
+@contextmanager
+def como_arquivo(pdf: bytes | str | Path) -> Iterator[str]:
+    """Caminho do PDF em disco. Bytes vão para um arquivo temporário, apagado
+    na saída: abrir por caminho faz o MuPDF ler sob demanda, em vez de copiar
+    o PDF inteiro para cada processo (workers e processo principal)."""
+    if not isinstance(pdf, (bytes, bytearray)):
+        yield str(pdf)
+        return
+    fd, caminho = tempfile.mkstemp(suffix=".pdf", prefix="extrator-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(pdf)
+        yield caminho
+    finally:
+        try:
+            os.unlink(caminho)
+        except OSError:
+            pass
+
+
+def _iniciar(caminho: str) -> None:
     global _doc
     os.environ["OMP_THREAD_LIMIT"] = "1"  # 1 thread por processo
-    _doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    _doc = fitz.open(caminho)
 
 
-def _ocr_indice(i: int) -> tuple[int, str, float, float]:
-    texto, ang = ocr_pagina(_doc[i])
-    return i, texto, ang, qualidade(texto)
+def _encerrar() -> None:
+    global _doc
+    if _doc is not None:
+        _doc.close()
+        _doc = None
 
 
-def ocr_paginas(pdf_bytes: bytes, indices: list[int],
-                progresso: Progresso | None = None) -> dict[int, tuple[str, float, float]]:
+def _ocr_indice(i: int) -> tuple[int, str, float, float, int, int]:
+    try:
+        texto, ang = ocr_pagina(_doc[i])
+    finally:
+        # Páginas escaneadas não compartilham recursos entre si: esvazia o
+        # cache do MuPDF (imagens decodificadas, renders) para o RSS do
+        # worker não crescer página a página até o teto de 256 MB do store.
+        fitz.TOOLS.store_shrink(100)
+    return i, texto, ang, qualidade(texto), os.getpid(), pico_rss_mb()
+
+
+def ocr_paginas(pdf: bytes | str | Path, indices: list[int],
+                progresso: Progresso | None = None,
+                telemetria: Telemetria | None = None,
+                ) -> dict[int, tuple[str, float, float]]:
     """OCR das páginas `indices` (0-based) em paralelo.
-    Retorna {índice: (texto, ângulo, qualidade)}."""
+    Retorna {índice: (texto, ângulo, qualidade)}; preenche `telemetria`."""
     out: dict[int, tuple[str, float, float]] = {}
+    tel = telemetria if telemetria is not None else Telemetria()
+    tel.cpu_count = os.cpu_count() or 0
+    tel.memoria_disponivel_mb = memoria_disponivel_mb()
     if not indices:
         return out
-    workers = min(len(indices), max(1, (os.cpu_count() or 2) - 1), 8)
-    feitas = 0
-    if workers == 1:
-        _iniciar(pdf_bytes)
-        for i in indices:
-            _, texto, ang, q = _ocr_indice(i)
-            out[i] = (texto, ang, q)
-            feitas += 1
-            if progresso:
-                progresso(feitas, len(indices))
-        return out
-    # ponytail: o PDF inteiro é enviado a cada worker; se a memória pesar,
-    # gravar em arquivo temporário e passar o caminho
-    with ProcessPoolExecutor(workers, initializer=_iniciar,
-                             initargs=(pdf_bytes,)) as ex:
-        for fut in as_completed(ex.submit(_ocr_indice, i) for i in indices):
-            i, texto, ang, q = fut.result()
-            out[i] = (texto, ang, q)
-            feitas += 1
-            if progresso:
-                progresso(feitas, len(indices))
+    workers = tel.workers = n_workers(len(indices))
+    picos: dict[int, int] = {}  # pid do worker -> pico de RSS (MB)
+
+    def registrar(res: tuple) -> None:
+        i, texto, ang, q, pid, pico = res
+        out[i] = (texto, ang, q)
+        picos[pid] = max(picos.get(pid, 0), pico)
+        if progresso:
+            progresso(len(out), len(indices))
+
+    with como_arquivo(pdf) as caminho:
+        if workers == 1:
+            _iniciar(caminho)
+            try:
+                for i in indices:
+                    registrar(_ocr_indice(i))
+            finally:
+                _encerrar()
+            picos.clear()  # rodou no processo principal: já conta em pico_pai
+        else:
+            with ProcessPoolExecutor(workers, initializer=_iniciar,
+                                     initargs=(caminho,)) as ex:
+                for fut in as_completed(ex.submit(_ocr_indice, i) for i in indices):
+                    registrar(fut.result())
+    tel.pico_worker_mb = max(picos.values(), default=0)
+    tel.soma_picos_workers_mb = sum(picos.values())
+    tel.pico_pai_mb = pico_rss_mb()
     return out
 
 
@@ -166,8 +288,10 @@ if __name__ == "__main__":
     assert not precisa_ocr(doc[0], doc[0].get_text())
     assert precisa_ocr(doc[1], doc[1].get_text())
     t = time.time()
-    r = ocr_paginas(doc.tobytes(), [1])
+    tel = Telemetria()
+    r = ocr_paginas(doc.tobytes(), [1], telemetria=tel)
     texto, ang, q = r[1]
+    print(tel)
     sim = difflib.SequenceMatcher(None, " ".join(ref.split()),
                                   " ".join(texto.split())).ratio()
     print(f"ângulo {ang:+.1f}° qualidade {q:.2f} similaridade {sim:.3f} "

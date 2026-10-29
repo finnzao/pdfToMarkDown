@@ -8,6 +8,13 @@ Em produção, defina EXTRATOR_USUARIO e EXTRATOR_SENHA para exigir
 autenticação HTTP Basic em todas as rotas (obrigatório para expor a
 aplicação na web — os documentos processados são sigilosos).
 
+Variáveis de ambiente de capacidade (ver DEPLOY.md):
+    MAX_MB                   tamanho máximo do PDF (padrão 200)
+    CONVERSOES_SIMULTANEAS   conversões em paralelo neste processo (padrão 1;
+                             as demais esperam e recebem {"fila": {...}})
+    OCR_WORKERS              força o nº de processos de OCR (padrão: calculado
+                             da CPU e da memória disponível)
+
 Endpoints:
     GET  /               interface web
     GET  /api/perfis     catálogo de prompts especializados
@@ -38,7 +45,13 @@ from pydantic import BaseModel, Field
 from .pipeline import processar
 from .pipeline.prompts import catalogo_api, montar_lotes, resolver
 
-MAX_BYTES = 200 * 1024 * 1024  # 200 MB por arquivo
+MAX_BYTES = int(os.environ.get("MAX_MB", "200")) * 1024 * 1024  # por arquivo
+
+# Cada conversão sobe o próprio pool de OCR (workers × centenas de MB), então
+# duas ao mesmo tempo dobram o pico de memória do servidor. Fila: uma por vez
+# por padrão; quem espera recebe {"fila": {"posicao": n}} no NDJSON.
+_CONVERSOES = asyncio.Semaphore(int(os.environ.get("CONVERSOES_SIMULTANEAS", "1")))
+_aguardando = 0
 
 _RAIZ = Path(__file__).resolve().parent.parent
 _STATIC = _RAIZ / "static"
@@ -87,12 +100,13 @@ async def converter(arquivo: UploadFile = File(...),
         raise HTTPException(400, "Prompt de análise desconhecido")
     dados = await arquivo.read()
     if len(dados) > MAX_BYTES:
-        raise HTTPException(413, "Arquivo maior que 200 MB")
+        raise HTTPException(413, f"Arquivo maior que {MAX_BYTES >> 20} MB")
     if not dados.startswith(b"%PDF"):
         raise HTTPException(400, "Conteúdo não é um PDF válido")
 
-    # Resposta em NDJSON: linhas {"progresso": {feitas, total}} durante o
-    # OCR e, por último, {"resultado": {...}} ou {"erro": "..."}.
+    # Resposta em NDJSON: {"fila": {posicao}} enquanto espera a vez, linhas
+    # {"progresso": {feitas, total}} durante o OCR e, por último,
+    # {"resultado": {...}} ou {"erro": "..."}.
     loop = asyncio.get_running_loop()
     fila: asyncio.Queue = asyncio.Queue()
 
@@ -102,12 +116,25 @@ async def converter(arquivo: UploadFile = File(...),
         )
 
     async def rodar() -> None:
+        global _aguardando
         try:
-            # processamento é CPU-bound: roda no threadpool para não
-            # bloquear o event loop enquanto outros usuários usam a aplicação
-            r = await run_in_threadpool(
-                processar, dados, arquivo.filename, perfil or None, progresso
-            )
+            na_fila = _CONVERSOES.locked()
+            if na_fila:
+                _aguardando += 1
+                fila.put_nowait({"fila": {"posicao": _aguardando}})
+            try:
+                await _CONVERSOES.acquire()
+            finally:
+                if na_fila:
+                    _aguardando -= 1
+            try:
+                # processamento é CPU-bound: roda no threadpool para não
+                # bloquear o event loop enquanto outros usuários usam a aplicação
+                r = await run_in_threadpool(
+                    processar, dados, arquivo.filename, perfil or None, progresso
+                )
+            finally:
+                _CONVERSOES.release()
             fila.put_nowait({"resultado": _json_resultado(r)})
         except Exception:
             traceback.print_exc()
@@ -140,6 +167,7 @@ def _json_resultado(r) -> dict:
             "paginas_descartadas": r.paginas_descartadas,
             "chars_bruto": r.chars_bruto,
             "chars_limpo": r.chars_limpo,
+            "recursos": r.recursos,  # workers e picos de RSS (MB) do OCR
         },
         "avisos": r.avisos,
         "perfil": r.perfil,  # {area, categoria, prompt, ...} ou null

@@ -16,7 +16,10 @@ sem estes três itens:
 2. **HTTPS** — HTTP Basic sem TLS trafega a senha em claro. Todas as
    opções abaixo já entregam HTTPS.
 3. **Nenhum armazenamento** — a aplicação é stateless por design: o PDF
-   é processado em memória e nada é gravado em disco. Mantenha assim.
+   fica num arquivo temporário do sistema só enquanto é processado (os
+   processos de OCR o leem do disco em vez de receberem cópias em RAM) e é
+   apagado ao fim da conversão, com ou sem erro. Nada persiste. Mantenha
+   assim.
 
 ---
 
@@ -115,8 +118,10 @@ variáveis de autenticação definidas). Zero exposição externa.
 | Parâmetro | Onde | Recomendação |
 |-----------|------|--------------|
 | Workers | `Dockerfile` (CMD) | ≈ nº de vCPUs (CPU-bound) |
-| Tamanho máximo | `app/main.py` (`MAX_BYTES`) | 200 MB (padrão) |
-| Memória do contêiner | `docker run --memory` | ≥ 2 GB por worker |
+| Tamanho máximo | variável `MAX_MB` | 200 MB (padrão) |
+| Conversões simultâneas por processo | variável `CONVERSOES_SIMULTANEAS` | 1 (as demais esperam na fila) |
+| Processos de OCR por conversão | variável `OCR_WORKERS` | calculado: min(CPUs−1, memória disponível ÷ 600 MB, 8) |
+| Memória do contêiner | `docker run --memory` | ≥ 2 GB por worker do uvicorn |
 
 ## Teste rápido pós-deploy
 

@@ -15,7 +15,7 @@ from .capa import (MetaProcesso, casar_indice_com_rodapes, eh_capa,
                    eh_continuacao_capa, parsear_capa)
 from .classificacao import (categoria_do_tipo_pje, classificar_conteudo, grupo)
 from .markdown_gen import gerar_markdown
-from .ocr import Progresso, ocr_paginas, precisa_ocr
+from .ocr import Progresso, Telemetria, como_arquivo, ocr_paginas, precisa_ocr
 from .prompts import montar_documento
 from .segmentacao import segmentar
 
@@ -43,6 +43,7 @@ class Resultado:
     perfil: dict | None = None  # prompt especializado aplicado (ou None)
     autos: str = ""  # markdown sem envelope/prompts (para montar lotes)
     paginas_ocr: int = 0
+    recursos: dict | None = None  # memória/workers do OCR (ocr.Telemetria)
 
 
 def extrair_paginas(doc: fitz.Document) -> list[str]:
@@ -51,20 +52,24 @@ def extrair_paginas(doc: fitz.Document) -> list[str]:
     return [page.get_text("text", sort=True) for page in doc]
 
 
-def extrair_com_ocr(pdf_bytes: bytes, progresso: Progresso | None = None
+def extrair_com_ocr(pdf_bytes: bytes, progresso: Progresso | None = None,
+                    telemetria: Telemetria | None = None,
                     ) -> tuple[list[str], dict[int, tuple[str, float, float]]]:
     """Camada de texto de todas as páginas; as escaneadas (sem camada de
     texto, imagem grande) passam pelo OCR. Retorna (textos, info_ocr) com
     info_ocr = {índice: (texto, ângulo, qualidade)}."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        paginas = extrair_paginas(doc)
-        indices = [i for i, t in enumerate(paginas) if precisa_ocr(doc[i], t)]
-    finally:
-        doc.close()
-    if indices and progresso:
-        progresso(0, len(indices))
-    info = ocr_paginas(pdf_bytes, indices, progresso)
+    # Um só arquivo temporário para o processo principal e os workers: o
+    # MuPDF lê do disco sob demanda em vez de manter cópias do PDF em RAM.
+    with como_arquivo(pdf_bytes) as caminho:
+        doc = fitz.open(caminho)
+        try:
+            paginas = extrair_paginas(doc)
+            indices = [i for i, t in enumerate(paginas) if precisa_ocr(doc[i], t)]
+        finally:
+            doc.close()
+        if indices and progresso:
+            progresso(0, len(indices))
+        info = ocr_paginas(caminho, indices, progresso, telemetria)
     for i, (texto, _, _) in info.items():
         paginas[i] = texto
     return paginas, info
@@ -92,7 +97,8 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
     """`progresso(feitas, total)` é chamado durante o OCR (única etapa
     lenta) para a interface mostrar o andamento."""
     avisos: list[str] = []
-    paginas, info_ocr = extrair_com_ocr(pdf_bytes, progresso)
+    telemetria = Telemetria()
+    paginas, info_ocr = extrair_com_ocr(pdf_bytes, progresso, telemetria)
 
     total = len(paginas)
     chars_bruto = sum(len(p) for p in paginas)
@@ -242,4 +248,5 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
         perfil=info_perfil,
         autos=autos,
         paginas_ocr=len(info_ocr),
+        recursos=telemetria.como_dict(),
     )
