@@ -15,11 +15,14 @@ sem estes três itens:
    apenas localmente.
 2. **HTTPS** — HTTP Basic sem TLS trafega a senha em claro. Todas as
    opções abaixo já entregam HTTPS.
-3. **Nenhum armazenamento** — a aplicação é stateless por design: o PDF
-   fica num arquivo temporário do sistema só enquanto é processado (os
+3. **Armazenamento mínimo** — a interface web é stateless: o PDF fica
+   num arquivo temporário do sistema só enquanto é processado (os
    processos de OCR o leem do disco em vez de receberem cópias em RAM) e é
-   apagado ao fim da conversão, com ou sem erro. Nada persiste. Mantenha
-   assim.
+   apagado ao fim da conversão, com ou sem erro. A API `/v1` grava em
+   `API_DIR_TEMP` (volume `/dados` no Docker): o PDF só até ser
+   convertido; o Markdown, o manifesto e o cache por até 24 h. Use disco
+   do próprio servidor, nunca um volume compartilhado ou com backup
+   externo. Configuração da `/v1`: [API.md](API.md).
 
 ---
 
@@ -117,11 +120,12 @@ variáveis de autenticação definidas). Zero exposição externa.
 
 | Parâmetro | Onde | Recomendação |
 |-----------|------|--------------|
-| Workers | `Dockerfile` (CMD) | ≈ nº de vCPUs (CPU-bound) |
-| Tamanho máximo | variável `MAX_MB` | 200 MB (padrão) |
-| Conversões simultâneas por processo | variável `CONVERSOES_SIMULTANEAS` | 1 (as demais esperam na fila) |
-| Processos de OCR por conversão | variável `OCR_WORKERS` | calculado: min(CPUs−1, memória disponível ÷ 600 MB, 8) |
-| Memória do contêiner | `docker run --memory` | ≥ 2 GB por worker do uvicorn |
+| Workers | `Dockerfile` (CMD) | **1** — os lotes da `/v1` ficam em memória; o OCR já usa todos os núcleos |
+| Conversões simultâneas | `CONVERSOES_SIMULTANEAS` (interface) / `API_CONCORRENCIA` (`/v1`) | 1 na interface (as demais esperam na fila); 2 na `/v1` |
+| Processos de OCR por conversão | `OCR_WORKERS` | calculado: min(CPUs−1, memória disponível ÷ 600 MB, 8) |
+| Tamanho máximo | `MAX_MB` / `API_LIMITE_*` | 200 MB na interface; 25 MB síncrono e 2 GB por lote na `/v1` |
+| Memória do contêiner | `mem_limit` / `docker run --memory` | ≥ 4 GB |
+| Corpo da requisição no proxy | Caddy `request_body` / Nginx `client_max_body_size` | 2 GB para os lotes da `/v1` |
 
 ## Teste rápido pós-deploy
 

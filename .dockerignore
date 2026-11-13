@@ -6,3 +6,9 @@ __pycache__/
 .git/
 .gitignore
 teste-*.md
+exemplos/
+tests/
+build/
+dist/
+.build-venv/
+.venv/

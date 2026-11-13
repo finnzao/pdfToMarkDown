@@ -6,6 +6,8 @@ title Extrator PDF Juridico
 set "PYEXE=python"
 python --version >nul 2>nul
 if errorlevel 1 set "PYEXE=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+rem Ambiente criado pelo instalar.bat (traz o segundo motor de OCR)
+if exist ".venv\Scripts\python.exe" set "PYEXE=.venv\Scripts\python.exe"
 
 rem Abre o navegador depois que o servidor subir
 start "" /b cmd /c "timeout /t 3 >nul & start http://127.0.0.1:8077"

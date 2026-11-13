@@ -8,6 +8,23 @@ Decisões (medidas em páginas sintéticas degradadas, ver histórico):
 - 300 dpi de renderização: ganho nulo acima disso;
 - deskew por perfil de projeção: o Tesseract tolera ~2° sozinho; a 4°
   perde 3% e a 6° perde 15% — com deskew volta a 99%, por 0,2 s/página.
+
+Medido em 477 páginas de OCR de 17 processos reais:
+- página de lado ou de cabeça para baixo (2% das páginas) sai como letras
+  soltas que passam em `qualidade`; refazer desvirada quando faltam
+  palavras comuns triplicou as palavras reconhecidas nessas páginas, sem
+  piorar nenhuma outra, por +40% de tempo de OCR (ver `_parece_virada`);
+  decidir o giro a 150 dpi acerta igual e custa menos da metade;
+- segundo motor (RapidOCR, `ocr2.py`): sozinho lê 17% menos palavras que o
+  Tesseract (ganha em 50 páginas, perde em 293), então não o substitui.
+  Rodando os dois em toda página e trocando só quando o segundo tem
+  claramente mais palavras sem perder palavras comuns: 28 páginas melhoram,
+  nenhuma piora, +2,3% de palavras, por 2,6x o tempo;
+- o Tesseract embutido muda com a versão do PyMuPDF (na 2.1, 473 das 477
+  páginas saem diferentes e 30 pioram): a versão fica fixa no requirements;
+- limpar a imagem antes do OCR não compensa nesses scans, que já têm fundo
+  branco: binarização adaptativa perdeu 3% das palavras e normalização de
+  fundo ficou no empate (+0,6%). Não foi adotada.
 """
 from __future__ import annotations
 
@@ -22,6 +39,8 @@ from typing import Callable, Iterator
 
 import pymupdf as fitz
 import numpy as np
+
+from . import ocr2
 
 TESSDATA = str(Path(__file__).resolve().parent / "tessdata")
 IDIOMA = "por"
@@ -45,12 +64,12 @@ def precisa_ocr(page: fitz.Page, texto: str) -> bool:
     return area_imgs / area_pagina >= _MIN_COBERTURA_IMAGEM
 
 
-def estimar_angulo(page: fitz.Page, dpi: int = 72) -> float:
-    """Ângulo (graus) que, aplicado à página, alinha as linhas de texto na
-    horizontal: maximiza a variação do perfil de projeção horizontal.
-    Busca grossa de 0,5° em ±6° e refino de 0,1°."""
+def estimar_angulo(page: fitz.Page, dpi: int = 72, giro: int = 0) -> float:
+    """Ângulo (graus) que, aplicado à página (já girada de `giro`), alinha as
+    linhas de texto na horizontal: maximiza a variação do perfil de projeção
+    horizontal. Busca grossa de 0,5° em ±6° e refino de 0,1°."""
     def score(ang: float) -> float:
-        m = fitz.Matrix(dpi / 72, dpi / 72).prerotate(ang)
+        m = fitz.Matrix(dpi / 72, dpi / 72).prerotate(giro + ang)
         pix = page.get_pixmap(matrix=m, colorspace=fitz.csGRAY)
         a = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w)
         linhas = (a < 128).sum(axis=1).astype(float)
@@ -60,31 +79,52 @@ def estimar_angulo(page: fitz.Page, dpi: int = 72) -> float:
     return float(max(np.arange(grosso - 0.5, grosso + 0.51, 0.1), key=score))
 
 
-def ocr_pagina(page: fitz.Page) -> tuple[str, float]:
-    """Retorna (texto, ângulo corrigido). Mantém a camada de texto original
-    (rodapé do PJe) para a segmentação por Id continuar funcionando."""
-    ang = estimar_angulo(page)
+def _extrair(page: fitz.Page, tp, blocos: bool):
+    if blocos:  # [(x0, y0, x1, y1, texto)] só de blocos de texto
+        return [b[:5] for b in page.get_text("blocks", textpage=tp, sort=True)
+                if b[6] == 0]
+    return page.get_text("text", textpage=tp, sort=True)
+
+
+def ocr_pagina(page: fitz.Page, idioma: str = IDIOMA, completo: bool = False,
+               blocos: bool = False, giro: int = 0) -> tuple[str | list, float]:
+    """Retorna (texto ou blocos, ângulo corrigido).
+
+    completo=False mantém a camada de texto original (rodapé do PJe, usado
+    pela segmentação por Id); completo=True reconhece a página inteira,
+    para quando a camada de texto existe mas é lixo.
+    `giro` (90/180/270) desvira página escaneada de lado ou de cabeça para
+    baixo."""
+    ang = giro + estimar_angulo(page, giro=giro)
     if abs(ang) < _ANGULO_MINIMO:
         # full=False: OCR só nas imagens, camada de texto preservada e
         # mesclada em ordem de leitura
-        tp = page.get_textpage_ocr(language=IDIOMA, dpi=DPI, full=False,
+        tp = page.get_textpage_ocr(language=idioma, dpi=DPI, full=completo,
                                    tessdata=TESSDATA)
-        return page.get_text("text", textpage=tp, sort=True), 0.0
+        return _extrair(page, tp, blocos), 0.0
 
-    m = fitz.Matrix(DPI / 72, DPI / 72).prerotate(ang)
-    pix = page.get_pixmap(matrix=m, colorspace=fitz.csGRAY)
+    saida = _ocr_girada(page, ang, idioma, DPI, blocos)
+    if blocos:
+        return saida, ang
+    # rodapé original por último: `id_da_pagina` usa a última ocorrência
+    return saida + "\n" + page.get_text("text"), ang
+
+
+def _ocr_girada(page: fitz.Page, ang: float, idioma: str, dpi: int,
+                blocos: bool = False) -> str | list:
+    """OCR da página renderizada como imagem, girada de `ang` graus."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72).prerotate(ang),
+                          colorspace=fitz.csGRAY)
     tmp = fitz.open()
     try:
-        p = tmp.new_page(width=pix.w * 72 / DPI, height=pix.h * 72 / DPI)
+        p = tmp.new_page(width=pix.w * 72 / dpi, height=pix.h * 72 / dpi)
         p.insert_image(p.rect, pixmap=pix)
         del pix  # ~8,7 MB a 300 dpi; o documento temporário já tem a cópia
-        tp = p.get_textpage_ocr(language=IDIOMA, dpi=DPI, full=True,
+        tp = p.get_textpage_ocr(language=idioma, dpi=dpi, full=True,
                                 tessdata=TESSDATA)
-        texto = p.get_text("text", textpage=tp, sort=True)
+        return _extrair(p, tp, blocos)
     finally:
         tmp.close()
-    # rodapé original por último: `id_da_pagina` usa a última ocorrência
-    return texto + "\n" + page.get_text("text"), ang
 
 
 # palavra (com pontos internos: "S.A."), número ("8.05.0001", "4.350,00")
@@ -95,16 +135,89 @@ _RE_TOKEN_BOM = re.compile(
 )
 
 
-def qualidade(texto: str) -> float:
+def qualidade(texto: str, min_tokens: int = 10) -> float:
     """Proporção de tokens com cara de palavra/número (0–1). O Tesseract
     do PyMuPDF não expõe confiança; isto é um proxy: OCR ruim produz
     tokens como 'c0ntr@t0' ou '|-.,~'."""
     # ponytail: heurística; trocar por confiança real se o PyMuPDF expor
     tokens = texto.split()
-    if len(tokens) < 10:
+    if len(tokens) < min_tokens:
         return 1.0
     bons = sum(1 for t in tokens if _RE_TOKEN_BOM.match(t))
     return bons / len(tokens)
+
+
+# Palavras muito frequentes em peça judicial, todas com 3+ letras: página
+# lida virada gera muito "de", "os", "se" por acaso, mas não "que" e "para".
+_COMUNS = frozenset(
+    "que para com não uma por dos das como mais mas nos nas aos foi sem ser "
+    "seu sua são essa esse esta este pela pelo processo autos juiz juíza "
+    "direito lei artigo ação réu autor comarca vara estado justiça "
+    "ministério público data assinado documento número nome".split())
+
+
+def portugues(texto: str) -> int:
+    """Quantas palavras comuns do português jurídico há no texto. Texto lido
+    de cabeça para baixo ou de lado vira letras que passam em `qualidade`,
+    mas quase nunca formam essas palavras."""
+    return sum(1 for t in texto.lower().split() if t.strip(".,;:()") in _COMUNS)
+
+
+_RE_PALAVRA = re.compile(r"^[(\"']?([A-Za-zÀ-ÿ]{4,})[.,;:!?)\"']*$")
+_VOGAIS = frozenset("aeiouáàâãéêíóôõúAEIOUÁÀÂÃÉÊÍÓÔÕÚ")
+_RE_4_CONSOANTES = re.compile(r"[^aeiouáàâãéêíóôõúAEIOUÁÀÂÃÉÊÍÓÔÕÚ]{4}")
+
+
+def palavras(texto: str) -> int:
+    """Quantas palavras de 4+ letras têm forma de português: vogais em
+    proporção normal, sem 4 consoantes seguidas e caixa coerente. Serve para
+    comparar duas leituras da mesma página; a melhor tem mais."""
+    n = 0
+    for t in texto.split():
+        m = _RE_PALAVRA.match(t)
+        if not m:
+            continue
+        w = m.group(1)
+        if (0.3 <= sum(c in _VOGAIS for c in w) / len(w) <= 0.7
+                and not _RE_4_CONSOANTES.search(w)
+                and (w.islower() or w.isupper() or w.istitle())):
+            n += 1
+    return n
+
+
+# Medido em 477 páginas de OCR de processos reais: páginas viradas ficam
+# abaixo de 6% de palavras comuns; texto corrido normal fica em torno de 12%.
+_MIN_TOKENS_GIRO = 60
+_MAX_COMUNS_VIRADA = 0.06
+_DPI_GIRO = 150  # basta para decidir a orientação e custa menos da metade
+
+
+def _parece_virada(texto: str) -> bool:
+    n = len(texto.split())
+    return n >= _MIN_TOKENS_GIRO and portugues(texto) / n < _MAX_COMUNS_VIRADA
+
+
+def _bem_melhor(nova: int, atual: int) -> bool:
+    return nova > 1.3 * atual + 3
+
+
+def _melhor_giro(page: fitz.Page, atual: int) -> int:
+    """0, 90, 180 ou 270: o giro em que uma leitura rápida da página rende
+    claramente mais palavras que as `atual` da leitura sem girar."""
+    n = {g: palavras(_ocr_girada(page, g, IDIOMA, _DPI_GIRO))
+         for g in (180, 90, 270)}
+    g = max(n, key=n.get)
+    return g if _bem_melhor(n[g], atual) else 0
+
+
+# Abaixo disso a página é tentada de novo com por+eng (se houver eng)
+QUALIDADE_MINIMA = 0.7
+_TEM_ENG = (Path(TESSDATA) / "eng.traineddata").exists()
+_TEM_OCR2 = ocr2.disponivel()  # pacote opcional, ver requirements-ocr2.txt
+
+
+def _como_texto(saida: str | list) -> str:
+    return saida if isinstance(saida, str) else "\n".join(b[4] for b in saida)
 
 
 # --- paralelismo por página -------------------------------------------------
@@ -215,35 +328,80 @@ def _encerrar() -> None:
         _doc = None
 
 
-def _ocr_indice(i: int) -> tuple[int, str, float, float, int, int]:
+def _ocr_indice(i: int, completo: bool = False, blocos: bool = False,
+                apagar: list | None = None) -> tuple:
+    """(índice, texto ou blocos, ângulo, qualidade, pid, pico de RSS em MB)."""
     try:
-        texto, ang = ocr_pagina(_doc[i])
+        saida, ang, q = _ler_pagina(i, completo, blocos, apagar)
     finally:
         # Páginas escaneadas não compartilham recursos entre si: esvazia o
         # cache do MuPDF (imagens decodificadas, renders) para o RSS do
         # worker não crescer página a página até o teto de 256 MB do store.
         fitz.TOOLS.store_shrink(100)
-    return i, texto, ang, qualidade(texto), os.getpid(), pico_rss_mb()
+    return i, saida, ang, q, os.getpid(), pico_rss_mb()
+
+
+def _ler_pagina(i: int, completo: bool, blocos: bool,
+                apagar: list | None) -> tuple[str | list, float, float]:
+    if apagar:
+        # tira da camada de texto (só nesta cópia em memória) o carimbo que
+        # o PJe imprime por cima do scan; a imagem por baixo fica intacta
+        page = _doc[i]
+        for r in apagar:
+            page.add_redact_annot(r, fill=False)
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
+                              graphics=fitz.PDF_REDACT_LINE_ART_NONE)
+    saida, ang = ocr_pagina(_doc[i], IDIOMA, completo, blocos)
+    texto = _como_texto(saida)
+    q = qualidade(texto)
+    if q < QUALIDADE_MINIMA and _TEM_ENG:  # fallback por+eng
+        s2, a2 = ocr_pagina(_doc[i], IDIOMA + "+eng", completo, blocos)
+        q2 = qualidade(_como_texto(s2))
+        if q2 > q:
+            saida, ang, q, texto = s2, a2, q2, _como_texto(s2)
+    if _parece_virada(texto) and (giro := _melhor_giro(_doc[i], palavras(texto))):
+        # página de lado ou de cabeça para baixo: refaz desvirada e só troca
+        # se a leitura completa também render claramente mais palavras
+        s2, a2 = ocr_pagina(_doc[i], IDIOMA, completo, blocos, giro)
+        t2 = _como_texto(s2)
+        if _bem_melhor(palavras(t2), palavras(texto)):
+            saida, ang, q, texto = s2, a2, qualidade(t2), t2
+    if _TEM_OCR2:
+        # segundo motor (rede neural) em toda página, na mesma orientação.
+        # O Tesseract lê melhor a maioria; a troca só vale se a outra leitura
+        # tiver claramente mais palavras e não perder palavras comuns
+        s2 = ocr2.ocr_pagina(_doc[i], ang, blocos)
+        t2 = _como_texto(s2)
+        if (_bem_melhor(palavras(t2), palavras(texto))
+                and portugues(t2) >= portugues(texto)):
+            if not blocos:  # rodapé original por último, como em ocr_pagina
+                s2 = s2 + "\n" + _doc[i].get_text("text")
+            saida, q = s2, qualidade(t2)
+    return saida, ang, q
 
 
 def ocr_paginas(pdf: bytes | str | Path, indices: list[int],
-                progresso: Progresso | None = None,
-                telemetria: Telemetria | None = None,
-                ) -> dict[int, tuple[str, float, float]]:
-    """OCR das páginas `indices` (0-based) em paralelo.
-    Retorna {índice: (texto, ângulo, qualidade)}; preenche `telemetria`."""
-    out: dict[int, tuple[str, float, float]] = {}
+                progresso: Progresso | None = None, completo: bool = False,
+                blocos: bool = False, apagar: dict[int, list] | None = None,
+                telemetria: Telemetria | None = None) -> dict[int, tuple]:
+    """OCR das páginas `indices` (0-based) em paralelo. `pdf` é o conteúdo
+    ou o caminho do arquivo (caminho evita copiar o PDF para cada processo).
+    `apagar` = {índice: [retângulos]} de texto a remover antes do OCR.
+    Retorna {índice: (texto ou blocos, ângulo, qualidade)}; preenche
+    `telemetria`."""
+    out: dict[int, tuple] = {}
     tel = telemetria if telemetria is not None else Telemetria()
     tel.cpu_count = os.cpu_count() or 0
     tel.memoria_disponivel_mb = memoria_disponivel_mb()
     if not indices:
         return out
+    apagar = apagar or {}
     workers = tel.workers = n_workers(len(indices))
     picos: dict[int, int] = {}  # pid do worker -> pico de RSS (MB)
 
     def registrar(res: tuple) -> None:
-        i, texto, ang, q, pid, pico = res
-        out[i] = (texto, ang, q)
+        i, saida, ang, q, pid, pico = res
+        out[i] = (saida, ang, q)
         picos[pid] = max(picos.get(pid, 0), pico)
         if progresso:
             progresso(len(out), len(indices))
@@ -253,14 +411,16 @@ def ocr_paginas(pdf: bytes | str | Path, indices: list[int],
             _iniciar(caminho)
             try:
                 for i in indices:
-                    registrar(_ocr_indice(i))
-            finally:
+                    registrar(_ocr_indice(i, completo, blocos, apagar.get(i)))
+            finally:  # no Windows, arquivo aberto não pode ser apagado depois
                 _encerrar()
             picos.clear()  # rodou no processo principal: já conta em pico_pai
         else:
             with ProcessPoolExecutor(workers, initializer=_iniciar,
                                      initargs=(caminho,)) as ex:
-                for fut in as_completed(ex.submit(_ocr_indice, i) for i in indices):
+                for fut in as_completed(
+                        ex.submit(_ocr_indice, i, completo, blocos, apagar.get(i))
+                        for i in indices):
                     registrar(fut.result())
     tel.pico_worker_mb = max(picos.values(), default=0)
     tel.soma_picos_workers_mb = sum(picos.values())
@@ -298,6 +458,18 @@ if __name__ == "__main__":
           f"{time.time() - t:.1f}s")
     assert abs(ang + 5) < 0.6 and sim > 0.95 and q > 0.9
     assert "Num. 12345678 - Pág. 1" in texto
+    # scans de cabeça para baixo e de lado: lidos depois de desvirar
+    for giro in (180, 90):
+        d2 = fitz.open()
+        pix = doc[0].get_pixmap(colorspace=fitz.csGRAY,
+                                matrix=fitz.Matrix(150 / 72, 150 / 72).prerotate(giro))
+        v =d2.new_page(width=pix.w * 72 / 150, height=pix.h * 72 / 150)
+        v.insert_image(v.rect, pixmap=pix)
+        texto, ang, q = ocr_paginas(d2.tobytes(), [0])[0]
+        sim = difflib.SequenceMatcher(None, " ".join(ref.split()),
+                                      " ".join(texto.split())).ratio()
+        print(f"virada {giro}°: desfeito com {ang:+.0f}°, similaridade {sim:.3f}")
+        assert sim > 0.95
     assert qualidade("c0ntr@t0 |-.,~ x9z!! a1b2 ..-- ;;; ### %% && p3t1ção "
                      "j|u1z ~~~ r3u") < 0.5
     assert qualidade("Processo nº 8012345-67.1998.8.05.0001 em face de BANCO "

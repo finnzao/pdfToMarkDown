@@ -1,5 +1,5 @@
 fastapi>=0.110
 uvicorn>=0.29
 python-multipart>=0.0.9
-PyMuPDF>=1.24
+PyMuPDF>=1.27,<1.28  # o Tesseract embutido muda entre versões; OCR medido na 1.27
 numpy>=1.26

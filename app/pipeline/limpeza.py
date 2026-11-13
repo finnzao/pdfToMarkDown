@@ -97,7 +97,9 @@ def limpar_pagina(texto: str, primeira_da_peca: bool = False) -> str:
     for p in _LIXO:
         t = p.sub("", t)
     t = _HIFEN_QUEBRA.sub(r"\1\2", t)
-    # normalização de espaço
+    # normalização de espaço: vão de colunas vira 2 espaços (o OCR e a
+    # extração por posição devolvem linhas com milhares de espaços)
+    t = re.sub(r"[ \t]{3,}", "  ", t)
     t = re.sub(r"[ \t]+\n", "\n", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()

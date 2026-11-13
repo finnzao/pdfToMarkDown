@@ -13,8 +13,8 @@ import pymupdf as fitz
 from . import limpeza
 from .capa import (MetaProcesso, casar_indice_com_rodapes, eh_capa,
                    eh_continuacao_capa, parsear_capa)
-from .classificacao import (categoria_do_tipo_pje, classificar_conteudo, grupo)
-from .markdown_gen import gerar_markdown
+from .classificacao import classificador
+from .markdown_gen import GeradorMarkdown
 from .ocr import Progresso, Telemetria, como_arquivo, ocr_paginas, precisa_ocr
 from .prompts import montar_documento
 from .segmentacao import segmentar
@@ -64,12 +64,14 @@ def extrair_com_ocr(pdf_bytes: bytes, progresso: Progresso | None = None,
         doc = fitz.open(caminho)
         try:
             paginas = extrair_paginas(doc)
-            indices = [i for i, t in enumerate(paginas) if precisa_ocr(doc[i], t)]
+            # decide sem o carimbo do PJe (~350 caracteres sobre os scans antigos)
+            indices = [i for i, t in enumerate(paginas)
+                       if precisa_ocr(doc[i], limpeza.limpar_pagina(t))]
         finally:
             doc.close()
         if indices and progresso:
             progresso(0, len(indices))
-        info = ocr_paginas(caminho, indices, progresso, telemetria)
+        info = ocr_paginas(caminho, indices, progresso, telemetria=telemetria)
     for i, (texto, _, _) in info.items():
         paginas[i] = texto
     return paginas, info
@@ -141,8 +143,14 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
     if primeira_corpo > 1:
         descartes.append(
             f"Págs. 1–{primeira_corpo - 1}: capa do PJe (metadados e índice "
-            f"convertidos em frontmatter e Linha do Tempo)."
+            f"convertidos em frontmatter e Índice)."
         )
+
+    paginas_por_id: dict[str, list[tuple[int, int]]] = {}
+    for peca in pecas_seg:
+        if peca.id_pje:
+            paginas_por_id.setdefault(peca.id_pje, []).append(
+                (peca.pag_ini, peca.pag_fim))
 
     for peca in pecas_seg:
         paginas_limpas = [
@@ -170,29 +178,26 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
             continue
 
         entrada = indice_por_id.get(peca.id_pje)
-        categoria = categoria_do_tipo_pje(entrada.tipo if entrada else None)
-        if categoria is None:
-            categoria = classificar_conteudo(texto)
-        if categoria == "DOC":
-            if entrada and entrada.tipo:
-                # Tipo oficial do PJe fora do mapa: a capa é a fonte de
-                # verdade — usa o tipo como categoria, sem aviso.
-                categoria = entrada.tipo.upper()
-            else:
-                # Sem entrada na capa e sem sinal no conteúdo: preserva
-                # integral como peça genérica e avisa.
-                categoria = "DOCUMENTO"
-                avisos.append(
-                    f"{pags}: tipo não identificado — transcrito "
-                    f"integralmente como DOCUMENTO."
-                )
+        categoria = classificador.classificar(
+            entrada.tipo if entrada else None,
+            entrada.titulo if entrada else None, texto)
+        if categoria == classificador.SEM_CATEGORIA and not (entrada and entrada.tipo):
+            # Sem entrada na capa e sem sinal no conteúdo: preserva
+            # integral como peça genérica e avisa.
+            avisos.append(
+                f"{pags}: tipo não identificado — transcrito "
+                f"integralmente como DOCUMENTO."
+            )
 
-        g = grupo(categoria) if categoria != "DOCUMENTO" else "A"
+        g = classificador.grupo(categoria)
         item = {
             "categoria": categoria,
             "grupo": g,
             "titulo": (entrada.titulo if entrada else ""),
+            "tipo": (entrada.tipo if entrada else ""),
             "data": (entrada.data if entrada else ""),
+            "hora": (entrada.hora if entrada else ""),
+            "sigiloso": bool(entrada and entrada.sigiloso),
             "id_pje": peca.id_pje,
             "pag_ini": peca.pag_ini,
             "pag_fim": peca.pag_fim,
@@ -222,10 +227,31 @@ def processar(pdf_bytes: bytes, nome_arquivo: str,
                 f"Id {e.id_pje} ({e.titulo})."
             )
 
-    markdown = gerar_markdown(
-        meta, nome_arquivo, total, pecas_a, pecas_b, descartes,
-        paginas_ocr=len(info_ocr),
-    )
+    for e in meta.indice:
+        divergencia = classificador.divergencia(e.tipo, e.titulo)
+        if divergencia:
+            avisos.append(
+                f"Id {e.id_pje}: cadastro divergente — o tipo \"{e.tipo}\" indica "
+                f"{divergencia[0]} e o título \"{e.titulo}\" indica "
+                f"{divergencia[1]}; mantida a categoria do tipo, conferir a peça."
+            )
+
+    # peças do corpo sem entrada no índice: sinal de índice cortado na capa
+    if meta.indice:
+        ids_indice = {e.id_pje for e in meta.indice}
+        fora = [i for i in paginas_por_id if i not in ids_indice
+                and not any(i.startswith(x) for x in ids_indice)]
+        if fora:
+            avisos.append(
+                f"Índice da capa possivelmente incompleto: {len(fora)} "
+                f"documento(s) do corpo sem entrada no índice (Ids "
+                f"{', '.join(fora[:20])}{'…' if len(fora) > 20 else ''})."
+            )
+
+    markdown = GeradorMarkdown(
+        meta, nome_arquivo, total, pecas_a + pecas_b, paginas_por_id,
+        descartes, avisos, paginas_ocr=len(info_ocr),
+    ).gerar()
     # Envelopa com o bloco de proteção contra prompt injection (sempre)
     # e o prompt especializado do catálogo (quando escolhido).
     autos = markdown

@@ -31,8 +31,18 @@ if not exist "%PYEXE%" (
 )
 
 :deps
-echo Instalando dependencias da aplicacao...
-"%PYEXE%" -m pip install --no-warn-script-location -q -r requirements.txt
+rem Ambiente proprio (.venv): as dependencias do segundo motor de OCR nao
+rem mexem nos pacotes de outros programas Python desta maquina.
+if not exist ".venv\Scripts\python.exe" "%PYEXE%" -m venv .venv
+if errorlevel 1 (
+    echo ERRO: falha ao criar o ambiente .venv.
+    pause
+    exit /b 1
+)
+set "PYEXE=.venv\Scripts\python.exe"
+
+echo Instalando dependencias da aplicacao (cerca de 300 MB, alguns minutos)...
+"%PYEXE%" -m pip install --no-warn-script-location -q -r requirements-ocr2.txt
 if errorlevel 1 (
     echo ERRO: falha ao instalar dependencias.
     pause

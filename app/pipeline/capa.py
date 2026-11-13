@@ -24,6 +24,7 @@ class EntradaIndice:
     hora: str            # HH:MM
     titulo: str          # coluna "Documento" (+ "Tipo" colada, na extração linear)
     tipo: str = ""       # coluna "Tipo", quando separável
+    sigiloso: bool = False
 
 
 @dataclass
@@ -42,15 +43,19 @@ class MetaProcesso:
 
 
 _RE_LINHA_DOC = re.compile(
-    r"^(\d{4,6})\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2})\s+(.+)$"
+    r"^(\d{4,10})\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2})\s+(.+)$"
 )
-_RE_COMPLEMENTO_ID = re.compile(r"^(\d{3,6})(?:\s+(\S.*))?$")
+_RE_COMPLEMENTO_ID = re.compile(r"^(\d{3,6})(?:\s*(SIGILOSO))?(?:\s+(\S.*))?$")
+# Documento sigiloso: a marca vem colada ao complemento do Id ("309SIGILOSO")
+# ou ao fim da linha, seguida do complemento ("CertidãoSIGILOSO662").
+_RE_SIGILOSO = re.compile(r"\s*SIGILOSO(\d{3,6})?\s*$")
+_RE_COLUNAS = re.compile(r"\s{2,}")
+_RE_TITULO_DOCUMENTOS = re.compile(r"^\s*Documentos\s*$", re.I | re.M)
+# Id com mais dígitos que isso já veio inteiro na linha: não tem complemento.
+_MAX_FRAGMENTO_ID = 6
 _RE_PARTE = re.compile(
     r"([A-ZÁÉÍÓÚÂÊÔÃÕÇ][A-ZÁÉÍÓÚÂÊÔÃÕÇ\s.\-&']{2,80}?)\s*"
-    r"\((AUTOR|AUTORA|INVESTIGADO|INVESTIGADA|R[ÉE]U|R[ÉE]"
-    r"|REQUERENTE|REQUERIDO|EXEQUENTE|EXECUTADO|RECLAMANTE|RECLAMADO"
-    r"|IMPETRANTE|IMPETRADO|V[ÍI]TIMA|INDICIADO|ACUSADO|APELANTE|APELADO"
-    r"|TERCEIRO\s+INTERESSADO|FISCAL\s+DA\s+LEI|CUSTOS\s+LEGIS)\)"
+    r"\(([A-ZÁÉÍÓÚÂÊÔÃÕÇ][A-ZÁÉÍÓÚÂÊÔÃÕÇ\s]{2,40}?)\)"
 )
 
 # Tipos oficiais do PJe que aparecem colados no fim da coluna "Documento".
@@ -84,8 +89,12 @@ def _deduplicar_cauda(texto: str) -> str:
 
 
 def _separar_titulo_tipo(resto: str) -> tuple[str, str]:
-    """Na extração linear, 'Documento' e 'Tipo' vêm colados. Detecta o tipo
-    conhecido no sufixo. Trata também a duplicação ('Despacho Despacho')."""
+    """Separa as colunas 'Documento' e 'Tipo'. A extração preserva o vão
+    entre elas (2+ espaços); sem vão, cai no sufixo de tipo conhecido e na
+    duplicação ('Despacho Despacho')."""
+    colunas = [c for c in _RE_COLUNAS.split(resto.strip()) if c]
+    if len(colunas) > 1:
+        return " ".join(colunas[:-1]), colunas[-1]
     resto = re.sub(r"\s+", " ", resto).strip()
     # 1) duplicação Documento==Tipo ("Certidão de Devolução de Mandado
     #    Certidão de Devolução de Mandado") — resolve antes do sufixo,
@@ -118,7 +127,7 @@ def eh_capa(texto_pagina: str) -> bool:
         sinais += 1
     if re.search(r"Classe:", texto_pagina, re.I):
         sinais += 1
-    if re.search(r"^Documentos$", texto_pagina, re.I | re.M):
+    if _RE_TITULO_DOCUMENTOS.search(texto_pagina):
         sinais += 1
     tem_rodape = re.search(r"Num[.\s]+\d{5,}\s*[-–]\s*P[áa]g", texto_pagina)
     return sinais >= 2 and not tem_rodape
@@ -151,7 +160,8 @@ def parsear_capa(paginas_capa: list[str]) -> MetaProcesso:
     meta.segredo_justica = bool(re.search(r"Segredo de justi[çc]a\?\s*SIM", texto, re.I))
     meta.justica_gratuita = bool(re.search(r"Justi[çc]a gratuita\?\s*SIM", texto, re.I))
 
-    for m in _RE_PARTE.finditer(texto):
+    pos = _RE_TITULO_DOCUMENTOS.search(texto)
+    for m in _RE_PARTE.finditer(texto[:pos.start()] if pos else texto):
         nome = re.sub(r"\s+", " ", m.group(1)).strip()
         papel = re.sub(r"\s+", " ", m.group(2)).strip()
         if papel.upper() in ("TERCEIRO INTERESSADO", "FISCAL DA LEI", "CUSTOS LEGIS"):
@@ -162,7 +172,6 @@ def parsear_capa(paginas_capa: list[str]) -> MetaProcesso:
     # --- tabela "Documentos": reconstituição dos Ids quebrados -------------
     # Só considera a partir da linha "Documentos" para não confundir com
     # outras áreas da capa.
-    pos = re.search(r"^Documentos\s*$", texto, re.I | re.M)
     area = texto[pos.end():] if pos else texto
     linhas = area.splitlines()
     i = 0
@@ -172,16 +181,38 @@ def parsear_capa(paginas_capa: list[str]) -> MetaProcesso:
         if m:
             frag_id, data, hora, resto = m.groups()
             id_completo = frag_id
-            # a linha seguinte pode conter o complemento do Id (e sobra de título)
-            if i + 1 < len(linhas):
-                m2 = _RE_COMPLEMENTO_ID.match(linhas[i + 1].strip())
-                if m2 and not _RE_LINHA_DOC.match(linhas[i + 1].strip()):
-                    id_completo = frag_id + m2.group(1)
-                    i += 1  # consome a linha de complemento
+            marca = _RE_SIGILOSO.search(resto)
+            sigiloso = bool(marca)
+            if marca:
+                resto = resto[:marca.start()]
             titulo, tipo = _separar_titulo_tipo(resto)
-            meta.indice.append(EntradaIndice(id_completo, data, hora, titulo, tipo))
+            if marca and marca.group(1):
+                id_completo = frag_id + marca.group(1)
+            elif i + 1 < len(linhas) and len(frag_id) <= _MAX_FRAGMENTO_ID:
+                seguinte = linhas[i + 1].strip()
+                m2 = _RE_COMPLEMENTO_ID.match(seguinte)
+                if m2 and not _RE_LINHA_DOC.match(seguinte):
+                    id_completo = frag_id + m2.group(1)
+                    sigiloso = sigiloso or bool(m2.group(2))
+                    titulo, tipo = _continuar_colunas(titulo, tipo, m2.group(3))
+                    i += 1
+            meta.indice.append(
+                EntradaIndice(id_completo, data, hora, titulo, tipo, sigiloso))
         i += 1
     return meta
+
+
+def _continuar_colunas(titulo: str, tipo: str, sobra: str | None) -> tuple[str, str]:
+    """Junta ao título (e ao tipo) o texto que quebrou para a linha do
+    complemento do Id."""
+    colunas = [c for c in _RE_COLUNAS.split((sobra or "").strip()) if c]
+    if not colunas:
+        return titulo, tipo
+    # ponytail: sobra de uma coluna só é tratada como título; se um dia o
+    # tipo quebrar sozinho, decidir pela posição horizontal do trecho.
+    if len(colunas) == 1:
+        return f"{titulo} {colunas[0]}", tipo
+    return f"{titulo} {' '.join(colunas[:-1])}", f"{tipo} {colunas[-1]}"
 
 
 def casar_indice_com_rodapes(meta: MetaProcesso, ids_rodape: list[str]) -> None:
@@ -189,10 +220,13 @@ def casar_indice_com_rodapes(meta: MetaProcesso, ids_rodape: list[str]) -> None:
     Um Id de capa 'casa' com um rodapé quando é prefixo dele (Id quebrado
     cuja segunda parte não foi capturada) ou igual."""
     restantes = list(ids_rodape)
+    pendentes = []
     for entrada in meta.indice:
         if entrada.id_pje in restantes:
             restantes.remove(entrada.id_pje)
-            continue
+        else:
+            pendentes.append(entrada)
+    for entrada in pendentes:
         candidatos = [r for r in restantes if r.startswith(entrada.id_pje)]
         if len(candidatos) == 1:
             entrada.id_pje = candidatos[0]

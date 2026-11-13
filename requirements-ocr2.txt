@@ -1,0 +1,5 @@
+-r requirements.txt
+# Segundo motor de OCR (rede neural, CPU). Opcional: sem ele o OCR usa só o
+# Tesseract. Os modelos vêm dentro do pacote; nada é baixado ao rodar.
+rapidocr>=3.10
+onnxruntime>=1.20

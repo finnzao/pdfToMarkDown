@@ -22,6 +22,9 @@ Endpoints:
                          linha a linha e, por fim, o resultado com o Markdown
     POST /api/zip        lista [{nome, markdown}]; retorna um .zip
     POST /api/lotes      {limite_kb, processos}; .zip com MDemloteN.md
+
+As rotas acima servem a interface web. A API para integração (Fórum Hub)
+fica em /v1 — ver app/api_v1.py, API.md e o Swagger em /docs.
 """
 from __future__ import annotations
 
@@ -42,6 +45,7 @@ from fastapi.responses import (FileResponse, JSONResponse, Response,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import api_v1
 from .pipeline import processar
 from .pipeline.prompts import catalogo_api, montar_lotes, resolver
 
@@ -56,8 +60,9 @@ _aguardando = 0
 _RAIZ = Path(__file__).resolve().parent.parent
 _STATIC = _RAIZ / "static"
 
-app = FastAPI(title="Extrator PDF Jurídico → Markdown", docs_url=None,
-              redoc_url=None)
+app = FastAPI(title="Extrator PDF Jurídico → Markdown (API /v1)",
+              version=api_v1.VERSAO, redoc_url=None,
+              openapi_url="/v1/openapi.json", lifespan=api_v1.ciclo)
 
 # --- autenticação HTTP Basic (ativada por variáveis de ambiente) -----------
 _USUARIO = os.environ.get("EXTRATOR_USUARIO", "")
@@ -66,7 +71,8 @@ _SENHA = os.environ.get("EXTRATOR_SENHA", "")
 
 @app.middleware("http")
 async def _autenticacao(request: Request, call_next):
-    if _SENHA:  # sem senha configurada, roda aberto (uso local)
+    # /v1 usa Bearer próprio (api_v1.autenticar)
+    if _SENHA and not request.url.path.startswith("/v1/"):
         auth = request.headers.get("authorization", "")
         ok = False
         if auth.startswith("Basic "):
@@ -86,14 +92,12 @@ async def _autenticacao(request: Request, call_next):
     return await call_next(request)
 
 
-@app.get("/api/perfis")
+@app.get("/api/perfis", include_in_schema=False)
 async def perfis() -> JSONResponse:
     return JSONResponse(catalogo_api())
 
 
-@app.post("/api/converter")
-async def converter(arquivo: UploadFile = File(...),
-                    perfil: str = Form("")) -> StreamingResponse:
+async def _ler_pdf(arquivo: UploadFile, perfil: str) -> bytes:
     if not (arquivo.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "Envie um arquivo .pdf")
     if perfil and resolver(perfil) is None:
@@ -103,6 +107,13 @@ async def converter(arquivo: UploadFile = File(...),
         raise HTTPException(413, f"Arquivo maior que {MAX_BYTES >> 20} MB")
     if not dados.startswith(b"%PDF"):
         raise HTTPException(400, "Conteúdo não é um PDF válido")
+    return dados
+
+
+@app.post("/api/converter", include_in_schema=False)
+async def converter(arquivo: UploadFile = File(...),
+                    perfil: str = Form("")) -> StreamingResponse:
+    dados = await _ler_pdf(arquivo, perfil)
 
     # Resposta em NDJSON: {"fila": {posicao}} enquanto espera a vez, linhas
     # {"progresso": {feitas, total}} durante o OCR e, por último,
@@ -179,7 +190,7 @@ class _Arquivo(BaseModel):
     markdown: str
 
 
-@app.post("/api/zip")
+@app.post("/api/zip", include_in_schema=False)
 async def zipar(arquivos: list[_Arquivo]) -> Response:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -201,7 +212,7 @@ class _PedidoLotes(BaseModel):
     processos: list[_Processo]
 
 
-@app.post("/api/lotes")
+@app.post("/api/lotes", include_in_schema=False)
 async def lotes(pedido: _PedidoLotes) -> Response:
     """Junta os processos em MDemlote1.md, MDemlote2.md… de até limite_kb."""
     docs = montar_lotes([(p.autos, p.perfil or None) for p in pedido.processos],
@@ -216,10 +227,12 @@ async def lotes(pedido: _PedidoLotes) -> Response:
     )
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
     return FileResponse(_STATIC / "index.html",
                         headers={"Cache-Control": "no-store"})
 
+
+api_v1.instalar(app)
 
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")

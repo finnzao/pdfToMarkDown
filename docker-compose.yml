@@ -1,0 +1,28 @@
+# Uso:  API_CHAVES="forumhub:$(openssl rand -hex 24)" docker compose up -d --build
+# Todas as variáveis estão descritas em API.md.
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORTA_HOST:-8077}:8077"
+    environment:
+      API_CHAVES: ${API_CHAVES:?defina API_CHAVES, ex. forumhub:uma-chave-longa}
+      API_CORS_ORIGENS: ${API_CORS_ORIGENS:-http://localhost:3000}
+      API_CONCORRENCIA: ${API_CONCORRENCIA:-2}
+      API_RETENCAO_HORAS: ${API_RETENCAO_HORAS:-24}
+      API_CACHE_MAX_MB: ${API_CACHE_MAX_MB:-1024}
+      API_LIMITE_SYNC_MB: ${API_LIMITE_SYNC_MB:-25}
+      API_LIMITE_SYNC_PAGINAS: ${API_LIMITE_SYNC_PAGINAS:-200}
+      API_LIMITE_LOTE_MB: ${API_LIMITE_LOTE_MB:-2048}
+      API_LIMITE_LOTE_ARQUIVOS: ${API_LIMITE_LOTE_ARQUIVOS:-500}
+      API_LIMITE_REQ_MIN: ${API_LIMITE_REQ_MIN:-300}
+      # interface web (/): HTTP Basic opcional
+      EXTRATOR_USUARIO: ${EXTRATOR_USUARIO:-}
+      EXTRATOR_SENHA: ${EXTRATOR_SENHA:-}
+    volumes:
+      - dados:/dados
+    mem_limit: 4g
+
+volumes:
+  dados:

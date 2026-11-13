@@ -3,9 +3,19 @@
   "configurations": [
     {
       "name": "extrator",
-      "runtimeExecutable": "python",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8077"],
       "port": 8077
+    },
+    {
+      "name": "api-v1-teste",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8078"],
+      "env": {
+        "API_CHAVES": "forumhub:chave-local-de-teste",
+        "API_CORS_ORIGENS": "http://localhost:3000"
+      },
+      "port": 8078
     }
   ]
 }
